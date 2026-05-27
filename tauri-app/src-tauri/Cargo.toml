@@ -1,0 +1,34 @@
+[package]
+name = "smartconfig-tauri"
+version = "0.1.0"
+description = "Smart Config Editor - Tauri Application"
+authors = ["Anonymous"]
+rust-version = "1.70"
+edition = "2021"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+reqwest = { version = "0.11", features = ["json", "cookies"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+dirs = "5"
+scraper = "0.17"
+encoding_rs = "0.8"
+
+[features]
+# Optional renderer uses external Chromium/Chrome binary to dump DOM when static fetch fails.
+# Kept as a feature so CI or packagers can opt-in. This does not add extra Rust dependencies.
+renderer = []
+
+[profile.release]
+opt-level = 3
+strip = true
+lto = true

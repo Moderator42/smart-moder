@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Smart Config Editor
+Comment=Update SmartUK and SmartPDD configs
+Exec=smart-config-editor
+Icon=smart-config-editor
+Terminal=false
+Categories=Utility;

@@ -1,0 +1,1 @@
+{"main-capability":{"identifier":"main-capability","description":"Default capability for the app","local":true,"windows":["main"],"permissions":["core:event:allow-listen","core:event:allow-emit","shell:allow-open","dialog:allow-open"]}}
