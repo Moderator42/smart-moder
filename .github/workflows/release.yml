@@ -78,11 +78,7 @@ jobs:
                   if [ -f squashfs-root/AppRun ]; then
                     mv squashfs-root "${f}.extracted" || true
                     # create wrapper script at original filename to execute extracted AppRun
-                    cat > "$f" <<'EOF'
-#!/bin/sh
-DIR="$(cd "$(dirname "$0")" && pwd)/${f}.extracted"
-exec "$DIR/AppRun" "$@"
-EOF
+                    printf '%s\n' '#!/bin/sh' "DIR=\"\$(cd \"\$(dirname \"\$0\")\" && pwd)/${f}.extracted\"" 'exec "$DIR/AppRun" "$@"' > "$f"
                     chmod +x "$f" || true
                     echo "Created wrapper for $f -> ${f}.extracted/AppRun"
                   else
