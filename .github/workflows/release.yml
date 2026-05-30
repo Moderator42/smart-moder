@@ -14,8 +14,6 @@ jobs:
     runs-on: ubuntu-22.04
     container:
       image: archlinux:latest
-    env:
-      APPIMAGE_EXTRACT_AND_RUN: "1"
     steps:
       - name: Install system deps
         run: |
@@ -23,8 +21,7 @@ jobs:
           pacman -S --noconfirm \
             git curl wget base-devel \
             webkit2gtk-4.1 libappindicator-gtk3 librsvg patchelf \
-            nodejs npm \
-            squashfs-tools fuse2
+            nodejs npm
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
@@ -35,17 +32,14 @@ jobs:
         run: |
           source "$HOME/.cargo/env"
           npm ci
-          # APPIMAGE_EXTRACT_AND_RUN=1 передан через env job-а
-          # TMPDIR переопределяем на /root чтобы AppImage мог распаковаться
-          # (в Docker /tmp может быть noexec)
-          TMPDIR=/root npm run tauri build -- --bundles deb,rpm,appimage
+          npm run tauri build -- --bundles deb,rpm
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: linux-bundles
           path: |
-            tauri-app/src-tauri/target/release/bundle/appimage/*.AppImage
             tauri-app/src-tauri/target/release/bundle/deb/*.deb
+            tauri-app/src-tauri/target/release/bundle/rpm/*.rpm
 
   windows:
     runs-on: windows-latest
@@ -55,7 +49,7 @@ jobs:
         with:
           node-version: 20
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build installer
+      - name: Build
         working-directory: tauri-app
         run: |
           npm ci
