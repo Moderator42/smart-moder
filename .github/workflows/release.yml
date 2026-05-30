@@ -21,7 +21,7 @@ jobs:
       - name: Install Linux deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf wget
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf wget squashfs-tools
       - name: Build AppImage
         working-directory: tauri-app
         run: |
@@ -33,9 +33,8 @@ jobs:
           APPIMAGE=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" | head -1)
           echo "Fixing: $APPIMAGE"
 
-          # Распаковываем
-          chmod +x "$APPIMAGE"
-          "$APPIMAGE" --appimage-extract > /dev/null 2>&1
+          # Извлекаем через unsquashfs (не требует FUSE)
+          unsquashfs -d squashfs-root "$APPIMAGE"
 
           # Удаляем конфликтующие либы
           for lib in \
@@ -58,6 +57,7 @@ jobs:
           wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" -O appimagetool
           chmod +x appimagetool
           ARCH=x86_64 ./appimagetool squashfs-root "$APPIMAGE" 2>/dev/null
+
           rm -rf squashfs-root appimagetool
           echo "Done: $APPIMAGE"
       - name: Upload artifacts
