@@ -15,8 +15,19 @@ jobs:
     container:
       image: archlinux:latest
     steps:
+      - name: Cache tauri helpers, npm and cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/tauri/binary-releases
+            ~/.npm
+            ~/.cargo/registry
+          key: ${{ runner.os }}-tauri-${{ hashFiles('**/package-lock.json') }}
+
       - name: Install system deps
         run: |
+          pacman-key --init || true
+          pacman-key --populate archlinux || true
           pacman -Syu --noconfirm
           pacman -S --noconfirm \
             git curl wget base-devel \
@@ -34,6 +45,25 @@ jobs:
           source "$HOME/.cargo/env"
           npm ci
           npm run tauri build
+      - name: Inspect AppImage
+        working-directory: tauri-app
+        run: |
+          set -e
+          APPIMAGE=$(ls src-tauri/target/release/bundle/appimage/*.AppImage 2>/dev/null | head -n1 || true)
+          if [ -z "$APPIMAGE" ]; then
+            echo "No AppImage found, skipping inspect"
+            exit 0
+          fi
+          echo "Found $APPIMAGE"
+          # extract and ldd WebKitWebProcess for diagnosis
+          $APPIMAGE --appimage-extract >/dev/null 2>&1 || true
+          mkdir -p appimage-inspect
+          if [ -f squashfs-root/usr/libexec/webkit2gtk-4.1/WebKitWebProcess ]; then
+            ldd squashfs-root/usr/libexec/webkit2gtk-4.1/WebKitWebProcess > appimage-inspect/webkit-ldd.txt || true
+          else
+            echo "WebKitWebProcess not found at expected path" > appimage-inspect/webkit-ldd.txt
+          fi
+          tar -czf appimage-inspect.tar.gz appimage-inspect || true
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -41,6 +71,7 @@ jobs:
           path: |
             tauri-app/src-tauri/target/release/bundle/appimage/*.AppImage
             tauri-app/src-tauri/target/release/bundle/deb/*.deb
+            tauri-app/appimage-inspect.tar.gz
 
   windows:
     runs-on: windows-latest
