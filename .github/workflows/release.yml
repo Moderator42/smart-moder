@@ -71,7 +71,26 @@ jobs:
               chmod +x "$f" || true
               # Try to run version/help to catch missing libs
               if [[ "$f" == *.AppImage || "$f" == AppRun-* ]]; then
-                ./$f --version || ./$f --help || true
+                # If FUSE is not available (container), extract AppImage and wrap extracted AppRun
+                if [ ! -e /dev/fuse ]; then
+                  echo "FUSE not available; extracting $f"
+                  ./$f --appimage-extract >/dev/null 2>&1 || true
+                  if [ -f squashfs-root/AppRun ]; then
+                    mv squashfs-root "${f}.extracted" || true
+                    # create wrapper script at original filename to execute extracted AppRun
+                    cat > "$f" <<'EOF'
+#!/bin/sh
+DIR="$(cd "$(dirname "$0")" && pwd)/${f}.extracted"
+exec "$DIR/AppRun" "$@"
+EOF
+                    chmod +x "$f" || true
+                    echo "Created wrapper for $f -> ${f}.extracted/AppRun"
+                  else
+                    echo "Extraction failed or AppRun not found for $f"
+                  fi
+                else
+                  ./$f --version || ./$f --help || true
+                fi
               else
                 head -n 5 "$f" || true
               fi
