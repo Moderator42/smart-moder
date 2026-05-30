@@ -39,10 +39,10 @@ jobs:
           # APPIMAGE_EXTRACT_AND_RUN=1 нужен т.к. на CI нет FUSE.
           OFFSET=$(APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE" --appimage-offset 2>/dev/null)
 
-          # Fallback: ищем magic bytes через python3 если offset не получен
+          # Fallback: ищем magic bytes hsqs через grep если offset не получен
           if [ -z "$OFFSET" ] || ! [[ "$OFFSET" =~ ^[0-9]+$ ]]; then
-            echo "Falling back to python3 offset detection"
-            OFFSET=$(python3 -c 'import sys; d=open(sys.argv[1],"rb").read(524288); [print(d.find(m)) or exit(0) for m in [b"hsqs",b"sqsh"] if d.find(m)!=-1]; exit(1)' "$APPIMAGE")
+            echo "Falling back to grep offset detection"
+            OFFSET=$(LC_ALL=C grep -aobm1 $'\x68\x73\x71\x73' "$APPIMAGE" | head -1 | cut -d: -f1)
           fi
 
           echo "squashfs offset: $OFFSET"
