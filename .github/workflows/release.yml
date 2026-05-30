@@ -30,12 +30,15 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
       - uses: actions/checkout@v4
-      - name: Build AppImage
+      - name: Build
         working-directory: tauri-app
         run: |
           source "$HOME/.cargo/env"
           npm ci
-          npm run tauri build
+          # APPIMAGE_EXTRACT_AND_RUN=1 передан через env job-а
+          # TMPDIR переопределяем на /root чтобы AppImage мог распаковаться
+          # (в Docker /tmp может быть noexec)
+          TMPDIR=/root npm run tauri build -- --bundles deb,rpm,appimage
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
