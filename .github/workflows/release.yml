@@ -32,21 +32,41 @@ jobs:
         run: |
           APPIMAGE=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" | head -1)
           echo "Fixing: $APPIMAGE"
+          chmod +x "$APPIMAGE"
 
-          # AppImage имеет squashfs со смещением — находим его через magic bytes
-          OFFSET=$(grep -aboP '\xhsqs' "$APPIMAGE" 2>/dev/null | head -1 | cut -d: -f1 || true)
-          if [ -z "$OFFSET" ]; then
-            OFFSET=$(grep -aboP '\x73\x71\x73\x68' "$APPIMAGE" | head -1 | cut -d: -f1 || true)
+          # Получаем squashfs offset через встроенную команду AppImage runtime.
+          # --appimage-offset перехватывается runtime до запуска приложения — GUI не запускается.
+          # APPIMAGE_EXTRACT_AND_RUN=1 нужен т.к. на CI нет FUSE.
+          OFFSET=$(APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE" --appimage-offset 2>/dev/null)
+
+          # Fallback: ищем magic bytes через python3 если offset не получен
+          if [ -z "$OFFSET" ] || ! [[ "$OFFSET" =~ ^[0-9]+$ ]]; then
+            echo "Falling back to python3 offset detection"
+            OFFSET=$(python3 -c "
+import sys
+with open(sys.argv[1], 'rb') as f:
+    data = f.read(524288)
+for magic in [b'hsqs', b'sqsh']:
+    pos = data.find(magic)
+    if pos != -1:
+        print(pos)
+        sys.exit(0)
+sys.exit(1)
+" "$APPIMAGE")
           fi
-          if [ -z "$OFFSET" ]; then
-            # Стандартное смещение для AppImage Type 2
-            OFFSET=188416
-          fi
+
           echo "squashfs offset: $OFFSET"
 
-          unsquashfs -d squashfs-root -o "$OFFSET" "$APPIMAGE"
+          # Проверяем что offset найден
+          if [ -z "$OFFSET" ] || ! [[ "$OFFSET" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: Could not determine squashfs offset"
+            exit 1
+          fi
 
-          # Удаляем конфликтующие либы
+          # Распаковываем squashfs (-o поддерживается в squashfs-tools 4.5 на Ubuntu 22.04)
+          unsquashfs -o "$OFFSET" -d squashfs-root "$APPIMAGE"
+
+          # Удаляем конфликтующие системные либы
           for lib in \
             libwebkit2gtk-4.1.so.0 \
             libEGL.so.1 \
@@ -63,11 +83,13 @@ jobs:
             fi
           done
 
-          # Скачиваем appimagetool и пересобираем
+          # appimagetool сам является AppImage — нужен APPIMAGE_EXTRACT_AND_RUN=1
           wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" -O appimagetool
           chmod +x appimagetool
-          ARCH=x86_64 ./appimagetool --comp zstd squashfs-root "$APPIMAGE" 2>/dev/null || \
-          ARCH=x86_64 ./appimagetool squashfs-root "$APPIMAGE"
+
+          # Пишем во временный файл, потом атомарно заменяем оригинал
+          APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 ./appimagetool squashfs-root "${APPIMAGE}.new"
+          mv "${APPIMAGE}.new" "$APPIMAGE"
 
           rm -rf squashfs-root appimagetool
           echo "Done: $APPIMAGE"
