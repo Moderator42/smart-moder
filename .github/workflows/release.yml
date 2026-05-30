@@ -34,6 +34,32 @@ jobs:
             webkit2gtk-4.1 libappindicator-gtk3 librsvg patchelf \
             nodejs npm \
             squashfs-tools fuse2
+      - name: Ensure tauri helper binaries (linuxdeploy/AppRun)
+        run: |
+          set -e
+          mkdir -p $HOME/.cache/tauri/binary-releases
+          cd $HOME/.cache/tauri/binary-releases
+          # helper to retry downloads
+          fetch() {
+            url="$1"; out="$2"; tries=0
+            until [ $tries -ge 5 ]
+            do
+              if curl -fSL "$url" -o "$out"; then
+                chmod +x "$out" || true
+                return 0
+              fi
+              tries=$((tries+1))
+              echo "Retry $tries for $url"
+              sleep 3
+            done
+            echo "Failed to download $url" >&2
+            return 1
+          }
+          fetch https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-x86_64 AppRun-x86_64 || true
+          fetch https://github.com/tauri-apps/binary-releases/releases/download/linuxdeploy/linuxdeploy-x86_64.AppImage linuxdeploy-x86_64.AppImage || true
+          fetch https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh linuxdeploy-plugin-gtk.sh || true
+          fetch https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gstreamer/master/linuxdeploy-plugin-gstreamer.sh linuxdeploy-plugin-gstreamer.sh || true
+          fetch https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage linuxdeploy-plugin-appimage-x86_64.AppImage || true
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
