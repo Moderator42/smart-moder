@@ -42,17 +42,7 @@ jobs:
           # Fallback: ищем magic bytes через python3 если offset не получен
           if [ -z "$OFFSET" ] || ! [[ "$OFFSET" =~ ^[0-9]+$ ]]; then
             echo "Falling back to python3 offset detection"
-            OFFSET=$(python3 -c "
-import sys
-with open(sys.argv[1], 'rb') as f:
-    data = f.read(524288)
-for magic in [b'hsqs', b'sqsh']:
-    pos = data.find(magic)
-    if pos != -1:
-        print(pos)
-        sys.exit(0)
-sys.exit(1)
-" "$APPIMAGE")
+            OFFSET=$(python3 -c 'import sys; d=open(sys.argv[1],"rb").read(524288); [print(d.find(m)) or exit(0) for m in [b"hsqs",b"sqsh"] if d.find(m)!=-1]; exit(1)' "$APPIMAGE")
           fi
 
           echo "squashfs offset: $OFFSET"
