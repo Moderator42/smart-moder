@@ -33,8 +33,18 @@ jobs:
           APPIMAGE=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" | head -1)
           echo "Fixing: $APPIMAGE"
 
-          # Извлекаем через unsquashfs (не требует FUSE)
-          unsquashfs -d squashfs-root "$APPIMAGE"
+          # AppImage имеет squashfs со смещением — находим его через magic bytes
+          OFFSET=$(grep -aboP '\xhsqs' "$APPIMAGE" 2>/dev/null | head -1 | cut -d: -f1 || true)
+          if [ -z "$OFFSET" ]; then
+            OFFSET=$(grep -aboP '\x73\x71\x73\x68' "$APPIMAGE" | head -1 | cut -d: -f1 || true)
+          fi
+          if [ -z "$OFFSET" ]; then
+            # Стандартное смещение для AppImage Type 2
+            OFFSET=188416
+          fi
+          echo "squashfs offset: $OFFSET"
+
+          unsquashfs -d squashfs-root -o "$OFFSET" "$APPIMAGE"
 
           # Удаляем конфликтующие либы
           for lib in \
@@ -56,7 +66,8 @@ jobs:
           # Скачиваем appimagetool и пересобираем
           wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" -O appimagetool
           chmod +x appimagetool
-          ARCH=x86_64 ./appimagetool squashfs-root "$APPIMAGE" 2>/dev/null
+          ARCH=x86_64 ./appimagetool --comp zstd squashfs-root "$APPIMAGE" 2>/dev/null || \
+          ARCH=x86_64 ./appimagetool squashfs-root "$APPIMAGE"
 
           rm -rf squashfs-root appimagetool
           echo "Done: $APPIMAGE"
