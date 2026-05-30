@@ -15,6 +15,7 @@ jobs:
     container:
       image: archlinux:latest
     steps:
+      - uses: actions/checkout@v4
       - name: Cache tauri helpers, npm and cargo
         uses: actions/cache@v4
         with:
@@ -32,7 +33,7 @@ jobs:
           pacman -S --noconfirm \
             git curl wget base-devel \
             webkit2gtk-4.1 libappindicator-gtk3 librsvg patchelf \
-            nodejs npm \
+            nodejs npm ttf-dejavu \
             squashfs-tools fuse2
       - name: Ensure tauri helper binaries (linuxdeploy/AppRun)
         run: |
@@ -98,14 +99,22 @@ jobs:
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-      - uses: actions/checkout@v4
       - name: Build AppImage
         working-directory: tauri-app
+        continue-on-error: true
         run: |
           source "$HOME/.cargo/env"
           npm ci
+          export APPIMAGE_EXTRACT_AND_RUN=1
           # capture full build output for diagnosis
-          npm run tauri build 2>&1 | tee tauri-build.log || true
+          npm run tauri build 2>&1 | tee tauri-build.log
+      - name: Fail build on AppImage error
+        working-directory: tauri-app
+        run: |
+          if grep -q "failed to run linuxdeploy" tauri-build.log; then
+            echo "AppImage build failed inside linuxdeploy"
+            exit 1
+          fi
       - name: Inspect AppImage
         working-directory: tauri-app
         run: |
@@ -126,6 +135,7 @@ jobs:
           fi
           tar -czf appimage-inspect.tar.gz appimage-inspect || true
       - name: Upload artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: linux-bundles
