@@ -104,7 +104,8 @@ jobs:
         run: |
           source "$HOME/.cargo/env"
           npm ci
-          npm run tauri build
+          # capture full build output for diagnosis
+          npm run tauri build 2>&1 | tee tauri-build.log || true
       - name: Inspect AppImage
         working-directory: tauri-app
         run: |
@@ -131,7 +132,8 @@ jobs:
           path: |
             tauri-app/src-tauri/target/release/bundle/appimage/*.AppImage
             tauri-app/src-tauri/target/release/bundle/deb/*.deb
-            tauri-app/appimage-inspect.tar.gz
+              tauri-app/appimage-inspect.tar.gz
+              tauri-app/tauri-build.log
 
   windows:
     runs-on: windows-latest
