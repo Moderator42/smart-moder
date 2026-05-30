@@ -9,6 +9,43 @@ mod update;
 
 use types::{Config, ServerInfo};
 
+#[cfg(target_os = "linux")]
+fn set_linux_runtime_env() {
+    // Определяем сессию: Wayland или X11
+    let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok()
+        || std::env::var("XDG_SESSION_TYPE")
+            .unwrap_or_default()
+            .to_lowercase()
+            == "wayland";
+
+    if is_wayland {
+        // --- Wayland ---
+        std::env::set_var("GDK_BACKEND", "wayland");
+        std::env::set_var("EGL_PLATFORM", "wayland");
+        // WebKit на Wayland: отключаем dmabuf-рендерер (он ломает EGL на многих дистрах)
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+    } else {
+        // --- X11 ---
+        std::env::set_var("GDK_BACKEND", "x11");
+        std::env::set_var("EGL_PLATFORM", "x11");
+        std::env::set_var("GSK_RENDERER", "cairo");
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        // Программный рендеринг как fallback на X11 без нормального EGL
+        std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1");
+        std::env::set_var("MESA_GL_VERSION_OVERRIDE", "3.3");
+        std::env::set_var("MESA_GLSL_VERSION_OVERRIDE", "330");
+    }
+
+    // Общие фиксы для обеих сессий: убираем sandbox WebKit (причина EGL_BAD_PARAMETER)
+    std::env::set_var("WEBKIT_FORCE_SANDBOX", "0");
+    std::env::set_var("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1");
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_linux_runtime_env() {}
+
 #[tauri::command]
 async fn load_config() -> Result<Config, String> {
     config::load_config().map_err(|e| e.to_string())
@@ -42,6 +79,8 @@ async fn run_update(
 }
 
 fn main() {
+    set_linux_runtime_env();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
