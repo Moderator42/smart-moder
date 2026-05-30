@@ -60,6 +60,25 @@ jobs:
           fetch https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh linuxdeploy-plugin-gtk.sh || true
           fetch https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gstreamer/master/linuxdeploy-plugin-gstreamer.sh linuxdeploy-plugin-gstreamer.sh || true
           fetch https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage linuxdeploy-plugin-appimage-x86_64.AppImage || true
+      - name: Verify tauri helper binaries
+        run: |
+          set -euo pipefail
+          ls -l $HOME/.cache/tauri/binary-releases || true
+          cd $HOME/.cache/tauri/binary-releases
+          for f in AppRun-x86_64 linuxdeploy-x86_64.AppImage linuxdeploy-plugin-appimage-x86_64.AppImage linuxdeploy-plugin-gtk.sh linuxdeploy-plugin-gstreamer.sh; do
+            if [ -f "$f" ]; then
+              echo "--- $f ---"
+              chmod +x "$f" || true
+              # Try to run version/help to catch missing libs
+              if [[ "$f" == *.AppImage || "$f" == AppRun-* ]]; then
+                ./$f --version || ./$f --help || true
+              else
+                head -n 5 "$f" || true
+              fi
+            else
+              echo "Missing $f"
+            fi
+          done
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
