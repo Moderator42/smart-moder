@@ -66,9 +66,13 @@
   };
 
   const loadAll = async () => {
-    cfg = (await invoke("load_config")) as Config;
-    servers = (await invoke("get_servers")) as ServerInfo[];
-    configPath = (await invoke("get_config_path")) as string;
+    try {
+      cfg = (await invoke("load_config")) as Config;
+      servers = (await invoke("get_servers")) as ServerInfo[];
+      configPath = (await invoke("get_config_path")) as string;
+    } catch (error) {
+      appendLog(`Failed to load config: ${error}`);
+    }
   };
 
   const save = async () => {

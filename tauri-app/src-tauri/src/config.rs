@@ -22,8 +22,20 @@ pub fn base_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+pub fn app_config_dir() -> PathBuf {
+    if cfg!(debug_assertions) {
+        return base_dir();
+    }
+
+    if let Some(dir) = dirs::config_dir() {
+        return dir.join("Smart Config Editor");
+    }
+
+    base_dir()
+}
+
 pub fn config_path() -> PathBuf {
-    base_dir().join("config.json")
+    app_config_dir().join("config.json")
 }
 
 pub fn get_servers() -> Vec<ServerInfo> {
@@ -118,6 +130,9 @@ pub fn fill_config_defaults(cfg: &mut Config) {
 
 pub fn save_config(cfg: &Config) -> Result<()> {
     let path = config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let data = serde_json::to_string_pretty(cfg)?;
     fs::write(&path, data)?;
     Ok(())
@@ -125,7 +140,7 @@ pub fn save_config(cfg: &Config) -> Result<()> {
 
 pub fn output_dir(cfg: &Config) -> PathBuf {
     if cfg.output_dir.trim().is_empty() {
-        return base_dir();
+        return app_config_dir();
     }
     expand_tilde(&cfg.output_dir)
 }
@@ -163,6 +178,6 @@ mod tests {
     #[test]
     fn output_dir_uses_base_dir_when_empty() {
         let cfg = Config::default();
-        assert_eq!(output_dir(&cfg), base_dir());
+        assert_eq!(output_dir(&cfg), app_config_dir());
     }
 }
