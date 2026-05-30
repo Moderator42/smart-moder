@@ -12,77 +12,28 @@ on:
 jobs:
   linux:
     runs-on: ubuntu-22.04
+    container:
+      image: archlinux:latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install Linux deps
+      - name: Install system deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf wget squashfs-tools
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm \
+            git curl wget base-devel \
+            webkit2gtk-4.1 libappindicator-gtk3 librsvg patchelf \
+            nodejs npm \
+            squashfs-tools fuse2
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - uses: actions/checkout@v4
       - name: Build AppImage
         working-directory: tauri-app
         run: |
+          source "$HOME/.cargo/env"
           npm ci
           npm run tauri build
-      - name: Fix AppImage (remove bundled system libs)
-        working-directory: tauri-app
-        run: |
-          APPIMAGE=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" | head -1)
-          echo "Fixing: $APPIMAGE"
-          chmod +x "$APPIMAGE"
-
-          # Получаем squashfs offset через встроенную команду AppImage runtime.
-          # --appimage-offset перехватывается runtime до запуска приложения — GUI не запускается.
-          # APPIMAGE_EXTRACT_AND_RUN=1 нужен т.к. на CI нет FUSE.
-          OFFSET=$(APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE" --appimage-offset 2>/dev/null)
-
-          # Fallback: ищем magic bytes hsqs через grep если offset не получен
-          if [ -z "$OFFSET" ] || ! [[ "$OFFSET" =~ ^[0-9]+$ ]]; then
-            echo "Falling back to grep offset detection"
-            OFFSET=$(LC_ALL=C grep -aobm1 $'\x68\x73\x71\x73' "$APPIMAGE" | head -1 | cut -d: -f1)
-          fi
-
-          echo "squashfs offset: $OFFSET"
-
-          # Проверяем что offset найден
-          if [ -z "$OFFSET" ] || ! [[ "$OFFSET" =~ ^[0-9]+$ ]]; then
-            echo "ERROR: Could not determine squashfs offset"
-            exit 1
-          fi
-
-          # Распаковываем squashfs (-o поддерживается в squashfs-tools 4.5 на Ubuntu 22.04)
-          unsquashfs -o "$OFFSET" -d squashfs-root "$APPIMAGE"
-
-          # Удаляем конфликтующие системные либы
-          for lib in \
-            libwebkit2gtk-4.1.so.0 \
-            libEGL.so.1 \
-            libEGL_mesa.so.0 \
-            libGL.so.1 \
-            libGLdispatch.so.0 \
-            libGLX.so.0 \
-            libGLX_mesa.so.0 \
-            libGLESv2.so.2 \
-            libgbm.so.1; do
-            if [ -f "squashfs-root/usr/lib/$lib" ]; then
-              echo "Removing bundled: $lib"
-              rm "squashfs-root/usr/lib/$lib"
-            fi
-          done
-
-          # appimagetool сам является AppImage — нужен APPIMAGE_EXTRACT_AND_RUN=1
-          wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" -O appimagetool
-          chmod +x appimagetool
-
-          # Пишем во временный файл, потом атомарно заменяем оригинал
-          APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 ./appimagetool squashfs-root "${APPIMAGE}.new"
-          mv "${APPIMAGE}.new" "$APPIMAGE"
-
-          rm -rf squashfs-root appimagetool
-          echo "Done: $APPIMAGE"
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
