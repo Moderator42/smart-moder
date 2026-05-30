@@ -21,12 +21,45 @@ jobs:
       - name: Install Linux deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf wget
       - name: Build AppImage
         working-directory: tauri-app
         run: |
           npm ci
           npm run tauri build
+      - name: Fix AppImage (remove bundled system libs)
+        working-directory: tauri-app
+        run: |
+          APPIMAGE=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" | head -1)
+          echo "Fixing: $APPIMAGE"
+
+          # Распаковываем
+          chmod +x "$APPIMAGE"
+          "$APPIMAGE" --appimage-extract > /dev/null 2>&1
+
+          # Удаляем конфликтующие либы
+          for lib in \
+            libwebkit2gtk-4.1.so.0 \
+            libEGL.so.1 \
+            libEGL_mesa.so.0 \
+            libGL.so.1 \
+            libGLdispatch.so.0 \
+            libGLX.so.0 \
+            libGLX_mesa.so.0 \
+            libGLESv2.so.2 \
+            libgbm.so.1; do
+            if [ -f "squashfs-root/usr/lib/$lib" ]; then
+              echo "Removing bundled: $lib"
+              rm "squashfs-root/usr/lib/$lib"
+            fi
+          done
+
+          # Скачиваем appimagetool и пересобираем
+          wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" -O appimagetool
+          chmod +x appimagetool
+          ARCH=x86_64 ./appimagetool squashfs-root "$APPIMAGE" 2>/dev/null
+          rm -rf squashfs-root appimagetool
+          echo "Done: $APPIMAGE"
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:

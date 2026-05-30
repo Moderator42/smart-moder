@@ -17,13 +17,7 @@
     ],
     "linux": {
       "appimage": {
-        "bundleMediaFramework": false,
-        "excludeLibs": [
-          "libwebkit2gtk-4.1.so.0",
-          "libEGL.so.1",
-          "libGL.so.1",
-          "libGLdispatch.so.0"
-        ]
+        "bundleMediaFramework": false
       }
     },
     "windows": {
