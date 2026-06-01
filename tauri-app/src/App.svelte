@@ -84,14 +84,14 @@
 
   const clearLog = () => { logLines = []; };
 
-  const getServerLink = (id: number, field: keyof ServerLinks): string =>
-    cfg.servers[String(id)]?.[field] ?? "";
+  const getServerLink = (id: number, field: string): string =>
+    (cfg.servers[String(id)] as any)?.[field] ?? "";
 
-  const setServerLink = (id: number, field: keyof ServerLinks, val: string) => {
+  const setServerLink = (id: number, field: string, val: string) => {
     if (!cfg.servers[String(id)]) {
       cfg.servers[String(id)] = { forum_uk_url: "", forum_uk_url_2: "", forum_pdd_url: "", forum_pdd_url_2: "" };
     }
-    cfg.servers[String(id)][field] = val;
+    (cfg.servers[String(id)] as any)[field] = val;
     cfg = cfg; // trigger reactivity
   };
 
@@ -183,6 +183,10 @@
       })).filter(g => g.servers.length > 0)
     : SERVER_GROUPS;
 
+  // ── Tab / mode helpers (no TypeScript casts in Svelte templates) ───────────
+  const setTab = (id: string) => { activeTab = id as "run" | "config" | "servers" | "ai"; };
+  const setMode = (val: string) => { mode = val as "uk" | "pdd" | "both"; };
+
   // ── Mount ────────────────────────────────────────────────────────────────────
   onMount(async () => {
     await loadAll();
@@ -221,7 +225,7 @@
         <button
           class="nav-btn"
           class:active={activeTab === tab.id}
-          on:click={() => (activeTab = tab.id as any)}
+          on:click={() => setTab(tab.id)}
         >
           <span class="nav-icon">{tab.icon}</span>
           <span>{tab.label}</span>
@@ -251,7 +255,7 @@
               <button
                 class="mode-btn"
                 class:selected={mode === val}
-                on:click={() => mode = val as any}
+                on:click={() => setMode(val)}
               >{lbl}</button>
             {/each}
           </div>
@@ -333,7 +337,7 @@
       <div class="card">
         <div class="card-label">Папка вывода</div>
         <div class="row-input">
-          <input class="inp" value={cfg.output_dir} on:input={e => cfg.output_dir = (e.target as HTMLInputElement).value} placeholder="~/.smart-config-editor" />
+          <input class="inp" value={cfg.output_dir} on:input={e => cfg.output_dir = e.currentTarget.value} placeholder="~/.smart-config-editor" />
           <button class="btn-icon" on:click={pickOutputDir}>📂</button>
           <button class="btn-icon" on:click={() => openShell(cfg.output_dir || configPath.replace(/[^/]+$/, ""))}>↗</button>
         </div>
@@ -424,12 +428,12 @@
                       <div class="row-input">
                         <input
                           class="inp"
-                          value={getServerLink(id, field as any)}
-                          on:input={e => setServerLink(id, field as any, (e.target as HTMLInputElement).value)}
+                          value={getServerLink(id, field)}
+                          on:input={e => setServerLink(id, field, e.currentTarget.value)}
                           placeholder="https://forum.arizona-rp.com/threads/..."
                         />
-                        {#if getServerLink(id, field as any)}
-                          <button class="btn-icon" on:click={() => openShell(getServerLink(id, field as any))}>↗</button>
+                        {#if getServerLink(id, field)}
+                          <button class="btn-icon" on:click={() => openShell(getServerLink(id, field))}>↗</button>
                         {/if}
                       </div>
                     </div>
