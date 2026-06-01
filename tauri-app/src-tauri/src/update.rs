@@ -6,7 +6,7 @@ use reqwest::StatusCode;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use tauri::{Emitter, Window};
+use tauri::{AppHandle, Emitter, Manager, Window};
 
 fn log(window: &Window, line: String) -> Result<()> {
     window.emit("log", line).map_err(|e| anyhow!("{e}"))
@@ -163,20 +163,22 @@ pub async fn run_update(
     skip_login: bool,
 ) -> Result<()> {
     let cfg = config::load_config()?;
+    let app = window.app_handle().clone();
 
     if mode == "both" {
         log(window, format!("Start: server {server_num}, mode both"))?;
-        run_update_mode(window, &cfg, server_num, "uk",  skip_login).await?;
-        run_update_mode(window, &cfg, server_num, "pdd", skip_login).await?;
+        run_update_mode(window, &app, &cfg, server_num, "uk",  skip_login).await?;
+        run_update_mode(window, &app, &cfg, server_num, "pdd", skip_login).await?;
         log(window, format!("Completed: server {server_num}, mode both"))?;
         return Ok(());
     }
 
-    run_update_mode(window, &cfg, server_num, &mode, skip_login).await
+    run_update_mode(window, &app, &cfg, server_num, &mode, skip_login).await
 }
 
 async fn run_update_mode(
     window: &Window,
+    app: &AppHandle,
     cfg: &crate::types::Config,
     server_num: u32,
     mode: &str,
@@ -218,7 +220,7 @@ async fn run_update_mode(
     // ── Fetch forum text ────────────────────────────────────────────────────
     log(window, "Fetching forum page...".to_string())?;
     let forum_text = match forum::fetch_with_fallback(
-        &links, mode, login, password, skip_login,
+        app, &links, mode, login, password, skip_login,
     )
     .await
     {
@@ -240,11 +242,13 @@ async fn run_update_mode(
         log(window, format!("Saved forum text -> {}", forum_path.display()))?;
     }
 
-    // ── Guard: if forum text is too short, warn but still continue ──────────
-    // (AI will keep existing JSON mostly unchanged if it gets no new text)
+    // ── Guard: abort if forum text is too short ─────────────────────────────
     if forum_text.trim().len() < 200 {
         log(window, "⚠ Текст форума слишком короткий — возможно, не удалось авторизоваться".to_string())?;
         log(window, "  Проверь логин/пароль или включи «Пропустить логин» если форум открыт без авторизации".to_string())?;
+        log(window, "  AI не вызывается — файл не изменён".to_string())?;
+        log(window, format!("Completed: server {server_num}, mode {mode}"))?;
+        return Ok(());
     }
 
     // ── Download base JSON from GitHub ──────────────────────────────────────

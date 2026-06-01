@@ -2,10 +2,12 @@
   "version": 2,
   "identifier": "main-capability",
   "description": "Default capability for the app",
-  "windows": ["main"],
+  "windows": ["main", "forum-fetch-*"],
   "permissions": [
     "core:event:allow-listen",
     "core:event:allow-emit",
+    "core:window:allow-create",
+    "core:webview:allow-create-webview-window",
     "shell:allow-open",
     "dialog:allow-open"
   ]

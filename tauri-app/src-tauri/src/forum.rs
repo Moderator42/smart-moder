@@ -1,14 +1,34 @@
+//! Forum fetching via Tauri WebviewWindow (primary) with reqwest fallback.
+//!
+//! How it works:
+//!   1. Create an invisible WebviewWindow pointed at `about:blank`.
+//!   2. An initialization script runs on every page load inside that window.
+//!      - On the login page: fills credentials, submits the form.
+//!      - After redirect (any non-login, non-thread page): navigates to thread.
+//!      - On the thread page: scrolls, extracts text, then navigates to a
+//!        special sentinel URL:  `https://tauri-forum-result.invalid/?ok=<text>`
+//!        or `https://tauri-forum-result.invalid/?err=<msg>`.
+//!   3. Rust watches navigation events on the window. When the sentinel domain
+//!      appears in a `navigation` event, it reads the query string and closes the window.
+//!   4. If WebView fails (creation error, timeout, etc.), fall back to reqwest.
+
 use anyhow::{anyhow, Result};
 use reqwest::header::{self, HeaderMap, HeaderValue};
 use reqwest::{Client, ClientBuilder};
 use scraper::{ElementRef, Html, Selector};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tauri::{AppHandle, Emitter, Listener, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::types::ServerLinks;
 
-/// Fetch forum text with proper XenForo cookie-based auth, anti-bot headers,
-/// and optional headless Chrome fallback.
+// ── Sentinel domain used to pass results back from JS ─────────────────────
+const SENTINEL: &str = "tauri-forum-result.invalid";
+
+// ── Public entry point ──────────────────────────────────────────────────────
+
 pub async fn fetch_with_fallback(
+    app: &AppHandle,
     links: &ServerLinks,
     mode: &str,
     login: &str,
@@ -20,36 +40,50 @@ pub async fn fetch_with_fallback(
         "pdd" => vec![links.forum_pdd_url.as_str(), links.forum_pdd_url_2.as_str()],
         _     => return Err(anyhow!("Unknown mode: {}", mode)),
     };
+    let urls: Vec<&str> = urls.into_iter().filter(|s| !s.trim().is_empty()).collect();
+    if urls.is_empty() {
+        return Err(anyhow!("No forum URLs configured for mode {}", mode));
+    }
 
-    let client = build_client()?;
     let mut parts: Vec<String> = Vec::new();
 
-    for url in urls.iter().filter(|s| !s.trim().is_empty()) {
-        // ── Step 1: try authenticated static fetch ──────────────────────────
-        let text = fetch_authenticated(&client, url, login, password, skip_login).await;
-        match text {
-            Ok(t) if looks_like_valid_text(&t) => {
-                parts.push(t);
+    for url in urls {
+        eprintln!("  [forum] Fetching: {url}");
+
+        // ── Primary: WebView ────────────────────────────────────────────────
+        let webview_result = fetch_via_webview(app, url, login, password, skip_login).await;
+
+        match webview_result {
+            Ok(ref text) if looks_like_valid_text(text) => {
+                eprintln!("  [forum] WebView OK: {} chars", text.len());
+                parts.push(webview_result.unwrap());
                 continue;
             }
-            Ok(t) => {
-                eprintln!("  Static fetch returned too-short text ({} chars), trying headless...", t.len());
+            Ok(ref text) => {
+                eprintln!("  [forum] WebView returned short text ({} chars), trying reqwest...", text.len());
             }
-            Err(e) => {
-                eprintln!("  Static fetch error: {e}, trying headless...");
+            Err(ref e) => {
+                eprintln!("  [forum] WebView failed: {e}, trying reqwest...");
             }
         }
 
-        // ── Step 2: headless Chrome fallback ────────────────────────────────
-        if let Ok(rendered) = run_headless_dump(url).await {
-            let extracted = extract_forum_text(&rendered);
-            if looks_like_valid_text(&extracted) {
-                parts.push(extracted);
-                continue;
+        // ── Fallback: reqwest ───────────────────────────────────────────────
+        let client = match build_client() {
+            Ok(c) => c,
+            Err(e) => { eprintln!("  [forum] reqwest client error: {e}"); continue; }
+        };
+        match fetch_authenticated(&client, url, login, password, skip_login).await {
+            Ok(text) if looks_like_valid_text(&text) => {
+                eprintln!("  [forum] reqwest OK: {} chars", text.len());
+                parts.push(text);
             }
+            Ok(text) if !text.is_empty() => {
+                eprintln!("  [forum] reqwest short ({} chars), using anyway", text.len());
+                parts.push(text);
+            }
+            Ok(_) => { eprintln!("  [forum] reqwest returned empty"); }
+            Err(e) => { eprintln!("  [forum] reqwest failed: {e}"); }
         }
-
-        eprintln!("  All fetch attempts failed for {url}");
     }
 
     if parts.is_empty() {
@@ -59,59 +93,261 @@ pub async fn fetch_with_fallback(
     }
 }
 
-/// Build reqwest client with cookie store + realistic browser headers.
-fn build_client() -> Result<Client> {
-    let mut default_headers = HeaderMap::new();
-    default_headers.insert(
-        header::USER_AGENT,
-        HeaderValue::from_static(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
-             AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/124.0.0.0 Safari/537.36",
-        ),
-    );
-    default_headers.insert(
-        header::ACCEPT,
-        HeaderValue::from_static(
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        ),
-    );
-    default_headers.insert(
-        header::ACCEPT_LANGUAGE,
-        HeaderValue::from_static("ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"),
-    );
-    default_headers.insert(
-        header::ACCEPT_ENCODING,
-        HeaderValue::from_static("gzip, deflate, br"),
-    );
-    default_headers.insert(
-        "Sec-Fetch-Dest",
-        HeaderValue::from_static("document"),
-    );
-    default_headers.insert(
-        "Sec-Fetch-Mode",
-        HeaderValue::from_static("navigate"),
-    );
-    default_headers.insert(
-        "Sec-Fetch-Site",
-        HeaderValue::from_static("none"),
-    );
-    default_headers.insert(
-        "Upgrade-Insecure-Requests",
-        HeaderValue::from_static("1"),
-    );
+// ── WebView fetch ───────────────────────────────────────────────────────────
 
+async fn fetch_via_webview(
+    app: &AppHandle,
+    thread_url: &str,
+    login: &str,
+    password: &str,
+    skip_login: bool,
+) -> Result<String> {
+    let label = format!("forum-fetch-{}", uuid_short());
+    let done_event = format!("forum-nav-{}", label);
+
+    // Shared result slot
+    let slot: Arc<Mutex<Option<Result<String>>>> = Arc::new(Mutex::new(None));
+    let slot_listener = slot.clone();
+
+    // Listen for navigation events emitted by the window
+    let done_event_clone = done_event.clone();
+    let _listener = app.listen(done_event_clone, move |event| {
+        // payload is JSON: {"ok":"..."} or {"err":"..."}
+        let v: serde_json::Value = serde_json::from_str(event.payload())
+            .unwrap_or(serde_json::Value::Null);
+        let result = if let Some(text) = v.get("ok").and_then(|s| s.as_str()) {
+            Ok(text.to_string())
+        } else if let Some(msg) = v.get("err").and_then(|s| s.as_str()) {
+            Err(anyhow!("{}", msg))
+        } else {
+            Err(anyhow!("bad event payload"))
+        };
+        *slot_listener.lock().unwrap() = Some(result);
+    });
+
+    let login_url = login_url_for(thread_url);
+    let js = build_init_script(login_url, thread_url, login, password, skip_login, &done_event);
+
+    // Build invisible window starting at login page (or thread directly if skip_login)
+    let start_url = if skip_login {
+        thread_url.to_string()
+    } else {
+        login_url.to_string()
+    };
+
+    let window = WebviewWindowBuilder::new(
+        app,
+        &label,
+        WebviewUrl::External(start_url.parse().map_err(|e| anyhow!("bad url: {e}"))?),
+    )
+    .title("Forum Fetch")
+    .visible(false)
+    .skip_taskbar(true)
+    .inner_size(1280.0, 900.0)
+    .initialization_script(&js)
+    .build()
+    .map_err(|e| anyhow!("WebviewWindow create failed: {e}"))?;
+
+    // Poll for result with 90s timeout
+    let start = std::time::Instant::now();
+    loop {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        {
+            let guard = slot.lock().unwrap();
+            if let Some(ref res) = *guard {
+                let _ = window.close();
+                return match res {
+                    Ok(t)  => Ok(t.clone()),
+                    Err(e) => Err(anyhow!("{e}")),
+                };
+            }
+        }
+        if start.elapsed() > Duration::from_secs(90) {
+            let _ = window.close();
+            return Err(anyhow!("WebView forum fetch timed out"));
+        }
+    }
+}
+
+// ── Init script injected into every page in the WebviewWindow ──────────────
+
+fn build_init_script(
+    login_url: &str,
+    thread_url: &str,
+    login: &str,
+    password: &str,
+    skip_login: bool,
+    done_event: &str,
+) -> String {
+    let login_url_js  = js_escape(login_url);
+    let thread_url_js = js_escape(thread_url);
+    let login_js      = js_escape(login);
+    let password_js   = js_escape(password);
+    let done_event_js = js_escape(done_event);
+    let skip_js       = if skip_login { "true" } else { "false" };
+
+    // We send results by emitting a Tauri event via __TAURI_INTERNALS__
+    // which is always available inside a Tauri WebviewWindow (including external URLs).
+    format!(r#"
+(function() {{
+  'use strict';
+
+  const LOGIN_URL    = "{login_url_js}";
+  const THREAD_URL   = "{thread_url_js}";
+  const LOGIN_VAL    = "{login_js}";
+  const PASS_VAL     = "{password_js}";
+  const DONE_EVENT   = "{done_event_js}";
+  const SKIP_LOGIN   = {skip_js};
+
+  function sleep(ms) {{ return new Promise(r => setTimeout(r, ms)); }}
+
+  // Send result back to Rust via Tauri IPC
+  async function sendResult(obj) {{
+    const payload = JSON.stringify(obj);
+    try {{
+      // Tauri 2 internal IPC — always available in any WebviewWindow
+      await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {{
+        event: DONE_EVENT,
+        payload: payload,
+        windowLabel: null,
+        target: {{ kind: 'App' }}
+      }});
+    }} catch(e1) {{
+      // Fallback: try the older path
+      try {{
+        window.__TAURI_INTERNALS__.postMessage({{
+          cmd: 'emit',
+          event: DONE_EVENT,
+          payload: payload
+        }});
+      }} catch(e2) {{
+        console.error('[forum-fetch] sendResult failed:', e1, e2);
+      }}
+    }}
+  }}
+
+  async function scrollFull() {{
+    let prev = -1;
+    for (let i = 0; i < 25; i++) {{
+      window.scrollBy(0, 2500);
+      await sleep(300);
+      const h = document.body.scrollHeight;
+      if (h === prev) break;
+      prev = h;
+    }}
+    window.scrollTo(0, 0);
+    await sleep(500);
+  }}
+
+  function extractText() {{
+    const selectors = [
+      '.message-body .bbWrapper',
+      '.messageText',
+      '.p-body-main',
+      'article',
+      '.bbWrapper',
+      '.message-userContent',
+    ];
+    for (const sel of selectors) {{
+      const els = [...document.querySelectorAll(sel)];
+      if (els.length > 0) {{
+        const parts = els
+          .map(el => (el.innerText || el.textContent || '').trim())
+          .filter(t => t.length > 50);
+        if (parts.length > 0) return parts.join('\n\n');
+      }}
+    }}
+    return (document.body.innerText || document.body.textContent || '').trim();
+  }}
+
+  async function doLogin() {{
+    for (let attempt = 0; attempt < 40; attempt++) {{
+      const li = document.querySelector('input[name="login"]');
+      const pi = document.querySelector('input[name="password"]');
+      const sb = document.querySelector('button[type="submit"], input[type="submit"]');
+      if (li && pi && sb) {{
+        // Suppress webdriver fingerprint
+        try {{ Object.defineProperty(navigator, 'webdriver', {{ get: () => undefined }}); }} catch(_) {{}}
+        li.value = LOGIN_VAL;
+        li.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        li.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        await sleep(200);
+        pi.value = PASS_VAL;
+        pi.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        pi.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        await sleep(200);
+        sb.click();
+        return;
+      }}
+      await sleep(300);
+    }}
+    // Login form not found — navigate straight to thread
+    window.location.href = THREAD_URL;
+  }}
+
+  async function doFetchThread() {{
+    await scrollFull();
+    const text = extractText();
+    await sendResult({{ ok: text }});
+  }}
+
+  async function main() {{
+    try {{
+      const href = window.location.href;
+      const isLoginPage   = href.includes('/login') && !href.includes(THREAD_URL);
+      const isThreadPage  = href.startsWith(THREAD_URL.split('?')[0].replace(/\/+$/, ''));
+
+      if (SKIP_LOGIN || isThreadPage) {{
+        // Already on thread (or skip_login) — just extract
+        await doFetchThread();
+        return;
+      }}
+
+      if (isLoginPage || href === 'about:blank' || href === '') {{
+        await doLogin();
+        // Navigation will happen; init script re-runs on the next page
+        return;
+      }}
+
+      // Intermediate page after login redirect — go to thread
+      window.location.href = THREAD_URL;
+
+    }} catch(err) {{
+      await sendResult({{ err: String(err) }});
+    }}
+  }}
+
+  if (document.readyState === 'loading') {{
+    document.addEventListener('DOMContentLoaded', main);
+  }} else {{
+    setTimeout(main, 0);
+  }}
+}})();
+"#)
+}
+
+// ── reqwest fallback ────────────────────────────────────────────────────────
+
+fn build_client() -> Result<Client> {
+    let mut h = HeaderMap::new();
+    h.insert(header::USER_AGENT,             HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"));
+    h.insert(header::ACCEPT,                 HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"));
+    h.insert(header::ACCEPT_LANGUAGE,        HeaderValue::from_static("ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"));
+    h.insert(header::ACCEPT_ENCODING,        HeaderValue::from_static("gzip, deflate, br"));
+    h.insert("Sec-Fetch-Dest",               HeaderValue::from_static("document"));
+    h.insert("Sec-Fetch-Mode",               HeaderValue::from_static("navigate"));
+    h.insert("Sec-Fetch-Site",               HeaderValue::from_static("none"));
+    h.insert("Upgrade-Insecure-Requests",    HeaderValue::from_static("1"));
     ClientBuilder::new()
         .timeout(Duration::from_secs(90))
         .connect_timeout(Duration::from_secs(30))
         .cookie_store(true)
-        .default_headers(default_headers)
+        .default_headers(h)
         .redirect(reqwest::redirect::Policy::limited(10))
         .build()
-        .map_err(|e| anyhow!("Failed to build HTTP client: {e}"))
+        .map_err(|e| anyhow!("reqwest client: {e}"))
 }
 
-/// Determine login URL based on forum domain.
 fn login_url_for(thread_url: &str) -> &'static str {
     if thread_url.contains("rodina-rp") || thread_url.contains("rodina") {
         "https://forum.rodina-rp.com/login/"
@@ -120,12 +356,6 @@ fn login_url_for(thread_url: &str) -> &'static str {
     }
 }
 
-/// Fetch a XenForo thread with cookie-based authentication.
-///
-/// Flow:
-///   1. GET /login/ — grab `_xfToken` from the form (CSRF)
-///   2. POST /login/login — submit credentials, follow redirect, store cookies
-///   3. GET <thread_url> — now authenticated, parse content
 async fn fetch_authenticated(
     client: &Client,
     url: &str,
@@ -133,209 +363,141 @@ async fn fetch_authenticated(
     password: &str,
     skip_login: bool,
 ) -> Result<String> {
-
     if !skip_login && !login.is_empty() && !password.is_empty() {
         let login_page_url = login_url_for(url);
-
-        // ── 1. GET login page to obtain CSRF token ──────────────────────────
-        let login_page = client
-            .get(login_page_url)
-            .send()
-            .await
-            .map_err(|e| anyhow!("GET login page failed: {e}"))?;
-
-        if !login_page.status().is_success() {
-            return Err(anyhow!("Login page returned {}", login_page.status()));
+        let page_resp = client.get(login_page_url).send().await
+            .map_err(|e| anyhow!("GET login: {e}"))?;
+        if !page_resp.status().is_success() {
+            return Err(anyhow!("login page status {}", page_resp.status()));
         }
+        let page_html = page_resp.text().await.unwrap_or_default();
+        let xf_token  = extract_xf_token(&page_html);
 
-        let login_html = login_page.text().await.unwrap_or_default();
-        let xf_token = extract_xf_token(&login_html);
-
-        // ── 2. POST credentials ─────────────────────────────────────────────
         let mut form = vec![
-            ("login",    login),
-            ("password", password),
-            ("remember", "1"),
+            ("login",       login),
+            ("password",    password),
+            ("remember",    "1"),
+            ("_xfRedirect", "/"),
         ];
-        let token_str;
-        if let Some(ref tok) = xf_token {
-            token_str = tok.clone();
-            form.push(("_xfToken", token_str.as_str()));
+        let tok_str;
+        if let Some(ref t) = xf_token {
+            tok_str = t.clone();
+            form.push(("_xfToken", tok_str.as_str()));
         }
 
         let post_url = format!("{}login", login_page_url);
-        let resp = client
-            .post(&post_url)
+        let resp = client.post(&post_url)
             .header(header::REFERER, login_page_url)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .form(&form)
-            .send()
-            .await
-            .map_err(|e| anyhow!("POST login failed: {e}"))?;
-
+            .send().await
+            .map_err(|e| anyhow!("POST login: {e}"))?;
         if !resp.status().is_success() && resp.status().as_u16() != 303 {
-            // 303 redirect after login is normal
-            return Err(anyhow!("Login POST returned {}", resp.status()));
+            return Err(anyhow!("login POST {}", resp.status()));
         }
-
-        // Consume body so redirect chain is followed
         let _ = resp.text().await;
-
-        // Small pause to mimic human behaviour
         tokio::time::sleep(Duration::from_millis(800)).await;
     }
 
-    // ── 3. GET the actual forum thread ──────────────────────────────────────
-    let resp = client
-        .get(url)
+    let resp = client.get(url)
         .header(header::REFERER, login_url_for(url))
-        .send()
-        .await
-        .map_err(|e| anyhow!("GET thread failed: {e}"))?;
-
+        .send().await
+        .map_err(|e| anyhow!("GET thread: {e}"))?;
     if !resp.status().is_success() {
-        return Err(anyhow!("Thread GET returned {}", resp.status()));
+        return Err(anyhow!("thread GET {}", resp.status()));
     }
-
     let html = resp.text().await.unwrap_or_default();
     let text = extract_forum_text(&html);
-
-    // Debug: if text looks short, log the start of the HTML for diagnosis
     if text.len() < 200 {
-        let preview: String = html.chars().take(500).collect();
-        eprintln!("  ⚠ Short text ({} chars). HTML preview:\n{}", text.len(), preview);
+        eprintln!("  [forum] reqwest short ({} chars), HTML preview: {}", text.len(),
+                  html.chars().take(400).collect::<String>());
     }
-
     Ok(text)
 }
 
-/// Extract `_xfToken` value from XenForo login page HTML.
+// ── HTML text extraction ────────────────────────────────────────────────────
+
 fn extract_xf_token(html: &str) -> Option<String> {
-    // XenForo 2: <input type="hidden" name="_xfToken" value="TOKEN">
     let doc = Html::parse_document(html);
     if let Ok(sel) = Selector::parse("input[name=\"_xfToken\"]") {
         if let Some(el) = doc.select(&sel).next() {
-            if let Some(val) = el.value().attr("value") {
-                return Some(val.to_string());
-            }
+            if let Some(v) = el.value().attr("value") { return Some(v.to_string()); }
         }
     }
-
-    // Fallback: regex-like scan
     if let Some(start) = html.find("name=\"_xfToken\"") {
-        let slice = &html[start..];
-        if let Some(v_start) = slice.find("value=\"") {
-            let after = &slice[v_start + 7..];
-            if let Some(end) = after.find('"') {
-                return Some(after[..end].to_string());
-            }
+        if let Some(vs) = html[start..].find("value=\"") {
+            let after = &html[start + vs + 7..];
+            if let Some(end) = after.find('"') { return Some(after[..end].to_string()); }
         }
     }
-
     None
 }
 
 pub fn extract_forum_text(html: &str) -> String {
     let doc = Html::parse_document(html);
-
-    // Try XenForo-specific selectors first, then generic fallbacks
-    let selectors = [
-        ".message-body .bbWrapper",
-        ".messageText",
-        ".p-body-main",
-        "article",
-        ".bbWrapper",
-        ".message-userContent",
-    ];
-
-    for selector in selectors.iter() {
+    for selector in &[
+        ".message-body .bbWrapper", ".messageText", ".p-body-main",
+        "article", ".bbWrapper", ".message-userContent",
+    ] {
         if let Ok(sel) = Selector::parse(selector) {
-            let blocks: Vec<String> = doc
-                .select(&sel)
+            let blocks: Vec<String> = doc.select(&sel)
                 .map(|el| normalize_block(&el))
                 .filter(|b| b.len() > 50)
                 .collect();
-
-            if !blocks.is_empty() {
-                return blocks.join("\n\n");
-            }
+            if !blocks.is_empty() { return blocks.join("\n\n"); }
         }
     }
-
-    // Last resort: whole body
-    if let Ok(body_sel) = Selector::parse("body") {
-        if let Some(body) = doc.select(&body_sel).next() {
-            let text = normalize_block(&body);
-            if !text.is_empty() {
-                return text;
-            }
+    if let Ok(sel) = Selector::parse("body") {
+        if let Some(b) = doc.select(&sel).next() {
+            let t = normalize_block(&b);
+            if !t.is_empty() { return t; }
         }
     }
-
     normalize_whitespace(&doc.root_element().text().collect::<Vec<_>>().join(" "))
 }
 
-fn normalize_block(element: &ElementRef<'_>) -> String {
-    normalize_whitespace(&element.text().collect::<Vec<_>>().join(" "))
+fn normalize_block(el: &ElementRef<'_>) -> String {
+    normalize_whitespace(&el.text().collect::<Vec<_>>().join(" "))
 }
 
 fn normalize_whitespace(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut prev_space = false;
-
+    let mut sp = false;
     for ch in text.replace('\u{a0}', " ").chars() {
-        if ch.is_whitespace() {
-            if !prev_space {
-                out.push(' ');
-                prev_space = true;
-            }
-        } else {
-            out.push(ch);
-            prev_space = false;
-        }
+        if ch.is_whitespace() { if !sp { out.push(' '); sp = true; } }
+        else { out.push(ch); sp = false; }
     }
-
     out.trim().to_string()
 }
 
 fn looks_like_valid_text(s: &str) -> bool {
-    let trimmed = s.trim();
-    if trimmed.len() < 200 {
-        return false;
-    }
-    let nonempty_lines = trimmed.lines().filter(|l| !l.trim().is_empty()).count();
-    nonempty_lines >= 3 || trimmed.contains("Глава") || trimmed.contains("Статья")
+    let t = s.trim();
+    if t.len() < 200 { return false; }
+    t.lines().filter(|l| !l.trim().is_empty()).count() >= 3
+        || t.contains("Глава") || t.contains("Статья")
 }
 
-async fn run_headless_dump(url: &str) -> Result<String> {
-    let candidates = [
-        "chromium", "chromium-browser", "google-chrome", "chrome", "brave-browser",
-    ];
+// ── Helpers ─────────────────────────────────────────────────────────────────
 
-    for cmd in &candidates {
-        for args in &[
-            vec!["--headless=new", "--disable-gpu", "--dump-dom", "--no-sandbox", url],
-            vec!["--headless",     "--disable-gpu", "--dump-dom", "--no-sandbox", url],
-        ] {
-            if let Ok(child) = tokio::process::Command::new(cmd)
-                .args(args)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                if let Ok(out) = child.wait_with_output().await {
-                    if out.status.success() {
-                        if let Ok(s) = String::from_utf8(out.stdout) {
-                            return Ok(s);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Err(anyhow!("No headless browser available"))
+fn js_escape(s: &str) -> String {
+    s.chars().flat_map(|c| match c {
+        '"'  => vec!['\\', '"'],
+        '\'' => vec!['\\', '\''],
+        '\\' => vec!['\\', '\\'],
+        '\n' => vec!['\\', 'n'],
+        '\r' => vec!['\\', 'r'],
+        '\t' => vec!['\\', 't'],
+        c    => vec![c],
+    }).collect()
 }
+
+fn uuid_short() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    format!("{:x}{:x}", t.as_secs(), t.subsec_nanos())
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -343,15 +505,12 @@ mod tests {
 
     #[test]
     fn extract_forum_text_prefers_message_body() {
-        let html = r#"
-            <html><body>
-              <div class="message-body"><div class="bbWrapper">
+        let html = r#"<html><body>
+            <div class="message-body"><div class="bbWrapper">
                 Глава 1. Общая часть.
                 <p>1.1 УК — Нападение на гражданское лицо.</p>
                 <p>1.2 УК — Незаконное хранение оружия.</p>
-              </div></div>
-            </body></html>
-        "#;
+            </div></div></body></html>"#;
         let text = extract_forum_text(html);
         assert!(text.contains("Глава 1. Общая часть."));
         assert!(text.contains("1.1 УК"));
@@ -367,5 +526,11 @@ mod tests {
     fn looks_like_valid_text_rejects_short() {
         assert!(!looks_like_valid_text("short"));
         assert!(looks_like_valid_text(&"Глава 1. ".repeat(50)));
+    }
+
+    #[test]
+    fn js_escape_special_chars() {
+        assert_eq!(js_escape(r#"a "b" c"#), r#"a \"b\" c"#);
+        assert_eq!(js_escape("line\nnew"),  r"line\nnew");
     }
 }

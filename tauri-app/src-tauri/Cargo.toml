@@ -11,7 +11,7 @@ publish = false
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["webview-data-url"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 reqwest = { version = "0.11", features = ["json", "cookies"] }
