@@ -10,6 +10,14 @@ const ARIZONA_VC: [u32; 1] = [200];
 const RODINA_PC: std::ops::RangeInclusive<u32> = 301..=307;
 const RODINA_MOBILE: std::ops::RangeInclusive<u32> = 401..=402;
 
+pub fn project_for_server(server_num: u32) -> &'static str {
+    if RODINA_PC.contains(&server_num) || RODINA_MOBILE.contains(&server_num) {
+        "rodina"
+    } else {
+        "arizona"
+    }
+}
+
 pub fn base_dir() -> PathBuf {
     if cfg!(debug_assertions) {
         return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));

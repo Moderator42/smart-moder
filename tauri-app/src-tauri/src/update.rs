@@ -140,13 +140,31 @@ pub async fn run_update(
     skip_login: bool,
 ) -> Result<()> {
     let cfg = config::load_config()?;
-    let output_root = config::output_dir(&cfg);
+
+    if mode == "both" {
+        log(window, format!("Start: server {server_num}, mode both"))?;
+        run_update_mode(window, &cfg, server_num, "uk", skip_login).await?;
+        run_update_mode(window, &cfg, server_num, "pdd", skip_login).await?;
+        log(window, format!("Completed: server {server_num}, mode both"))?;
+        return Ok(());
+    }
+
+    run_update_mode(window, &cfg, server_num, &mode, skip_login).await
+}
+
+async fn run_update_mode(
+    window: &Window,
+    cfg: &crate::types::Config,
+    server_num: u32,
+    mode: &str,
+    skip_login: bool,
+) -> Result<()> {
+    let output_root = config::output_dir(cfg);
     let server_dir = output_root.join(server_num.to_string());
     fs::create_dir_all(&server_dir)?;
 
     log(window, format!("Start: server {server_num}, mode {mode}"))?;
 
-    // Find server links in config
     let srv_key = server_num.to_string();
     let links = cfg
         .servers
@@ -154,9 +172,16 @@ pub async fn run_update(
         .ok_or_else(|| anyhow!("No server links for {}", srv_key))?
         .clone();
 
+    let project = config::project_for_server(server_num);
+    let (login, password) = if project == "rodina" {
+        (&cfg.rodina.login, &cfg.rodina.password)
+    } else {
+        (&cfg.arizona.login, &cfg.arizona.password)
+    };
+
     // Fetch forum text (static + headless fallback)
     log(window, "Fetching forum page...".to_string())?;
-    let forum_text = match forum::fetch_with_fallback(&links, &mode, &cfg.arizona.login, &cfg.arizona.password, skip_login).await {
+    let forum_text = match forum::fetch_with_fallback(&links, mode, login, password, skip_login).await {
         Ok(t) => t,
         Err(e) => {
             log(window, format!("Forum fetch failed: {e}"))?;
@@ -164,13 +189,11 @@ pub async fn run_update(
         }
     };
 
-    // Save forum raw text for inspection
-    let forum_path = server_dir.join("forum_raw.txt");
+    let forum_path = server_dir.join(format!("forum_raw_{}.txt", mode));
     fs::write(&forum_path, forum_text.as_bytes())?;
     log(window, format!("Saved forum text -> {}", forum_path.display()))?;
 
-    // Download GitHub JSON (if exists)
-    let url = github_raw_url(&mode, server_num);
+    let url = github_raw_url(mode, server_num);
     log(window, format!("Downloading JSON from {}", url))?;
     match reqwest::get(&url).await {
         Ok(resp) => {
@@ -178,7 +201,6 @@ pub async fn run_update(
                 log(window, format!("JSON not found on GitHub for server {server_num} ({mode})"))?;
             } else if resp.status().is_success() {
                 let bytes = resp.bytes().await.unwrap_or_default();
-                // Try to decode as utf-8 / utf-8-sig / cp1251
                 let decoded = String::from_utf8(bytes.to_vec())
                     .ok()
                     .or_else(|| {
@@ -193,12 +215,10 @@ pub async fn run_update(
                     write_cp1251(&dest, &s)?;
                     log(window, format!("Downloaded JSON -> {}", dest.display()))?;
 
-                    // Try to parse original JSON to pass to AI
                     let original_chapters = serde_json::from_str::<Vec<crate::types::Chapter>>(&s).ok();
 
-                    // Call AI to generate updated JSON
                     log(window, "Calling AI to generate updated JSON...".to_string())?;
-                    let ai_response = match crate::ai::call_ai(&cfg.ai, &mode, &forum_text, &s).await {
+                    let ai_response = match crate::ai::call_ai(&cfg.ai, mode, &forum_text, &s).await {
                         Ok(r) => r,
                         Err(e) => {
                             log(window, format!("AI error: {e}"))?;
@@ -211,7 +231,9 @@ pub async fn run_update(
                     if !ai_response.is_empty() {
                         match crate::merge::parse_ai_json(&ai_response) {
                             Ok(parsed) => {
-                                let processed = crate::merge::postprocess(&mode, parsed, original_chapters.as_ref());
+                                let processed = crate::merge::postprocess(mode, parsed, original_chapters.as_ref());
+                                let mut processed = crate::merge::add_updated_at(processed);
+                                crate::merge::sanitize_strings(&mut processed);
                                 if let Ok(out_json) = crate::merge::serialize_output(&processed) {
                                     backup_file(&dest)?;
                                     write_cp1251(&dest, &out_json)?;
@@ -227,7 +249,7 @@ pub async fn run_update(
 
                     if let Some(updated) = updated_json {
                         if let Some(original) = original_chapters.as_ref() {
-                            let (added, changed) = diff_summary(original, &updated, &mode);
+                            let (added, changed) = diff_summary(original, &updated, mode);
                             log(window, format!("Новых статей: +{}", added.len()))?;
                             if !added.is_empty() {
                                 log(window, format!("-> {}", added.iter().take(20).cloned().collect::<Vec<_>>().join(", ")))?;
@@ -237,12 +259,11 @@ pub async fn run_update(
                                 log(window, format!("-> {}", changed.iter().take(20).cloned().collect::<Vec<_>>().join(", ")))?;
                             }
 
-                            let changelog = format_changelog(&mode, &added, &changed, server_num);
-                            let cl_path = output_root.join(format!("changelog_{}.txt", server_num));
+                            let changelog = format_changelog(mode, &added, &changed, server_num);
+                            let cl_path = output_root.join(format!("changelog_{}_{}.txt", server_num, mode));
                             fs::write(&cl_path, format!("{}\n", changelog))?;
                             log(window, format!("Changelog -> {}", cl_path.display()))?;
 
-                            // Verification step like Python: reload file and ensure reasons are present
                             log(window, "Verifying saved file...".to_string())?;
                             if let Ok(saved_raw) = fs::read(&dest) {
                                 let saved_text = String::from_utf8(saved_raw.clone())

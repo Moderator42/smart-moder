@@ -21,27 +21,31 @@ pub async fn fetch_with_fallback(
         _ => return Err(anyhow!("Unknown mode: {}", mode)),
     };
 
-    // Try each URL in order with static fetch
+    let mut parts: Vec<String> = Vec::new();
+
     for u in urls.iter().filter(|s| !s.trim().is_empty()) {
+        // Try static fetch first
         if let Ok(txt) = fetch_forum_text(u, login, password, skip_login).await {
             if looks_like_valid_text(&txt) {
-                return Ok(txt);
+                parts.push(txt);
+                continue;
             }
-            // else continue to try headless or next url
         }
-    }
 
-    // If static fetch didn't return valid HTML, attempt to use headless browser dump
-    for u in urls.iter().filter(|s| !s.trim().is_empty()) {
+        // Fallback to headless dump
         if let Ok(rendered) = run_headless_dump(u).await {
             let text = extract_forum_text(&rendered);
             if looks_like_valid_text(&text) {
-                return Ok(text);
+                parts.push(text);
             }
         }
     }
 
-    Err(anyhow!("All fetch attempts failed for mode {}", mode))
+    if parts.is_empty() {
+        Err(anyhow!("All fetch attempts failed for mode {}", mode))
+    } else {
+        Ok(parts.join("\n\n"))
+    }
 }
 
 async fn fetch_forum_text(
@@ -76,7 +80,7 @@ pub fn extract_forum_text(html: &str) -> String {
     for selector in selectors.iter() {
         if let Ok(sel) = Selector::parse(selector) {
             let mut blocks = Vec::new();
-            for element in doc.select(&sel).take(5) {
+            for element in doc.select(&sel) {
                 let block = normalize_block(&element);
                 if block.len() > 50 {
                     blocks.push(block);
@@ -125,11 +129,11 @@ fn normalize_whitespace(text: &str) -> String {
 
 fn looks_like_valid_text(s: &str) -> bool {
     let trimmed = s.trim();
-    if trimmed.len() < 250 {
+    if trimmed.len() < 100 {
         return false;
     }
     let lines = trimmed.lines().filter(|line| !line.trim().is_empty()).count();
-    lines >= 3 || trimmed.contains("Глава") || trimmed.contains("Статья")
+    lines >= 2 || trimmed.contains("Глава") || trimmed.contains("Статья")
 }
 
 async fn run_headless_dump(url: &str) -> Result<String> {

@@ -74,6 +74,8 @@ pub struct Chapter {
     pub name: String,
     #[serde(default)]
     pub item: Vec<Item>,
+    #[serde(default)]
+    pub updated_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

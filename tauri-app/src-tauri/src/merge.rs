@@ -1,5 +1,6 @@
 use crate::types::Chapter;
 use anyhow::{anyhow, Result};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const PDD_AMOUNT_MIN: i64 = 100_000;
 const PDD_AMOUNT_MAX: i64 = 10_000_000;
@@ -117,6 +118,45 @@ pub fn postprocess(
     }
 
     data
+}
+
+pub fn add_updated_at(mut data: Vec<Chapter>) -> Vec<Chapter> {
+    data.retain(|ch| ch.name != "##updated_at");
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    data.push(Chapter {
+        name: "##updated_at".to_string(),
+        item: Vec::new(),
+        updated_at: Some(ts),
+    });
+    data
+}
+
+pub fn sanitize_strings(data: &mut [Chapter]) {
+    fn clean(s: &str) -> String {
+        s.chars()
+            .filter(|c| !matches!(c, '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}' | '\u{00ad}'))
+            .collect::<String>()
+    }
+
+    for ch in data.iter_mut() {
+        ch.name = clean(&ch.name);
+        for item in ch.item.iter_mut() {
+            item.reason = clean(&item.reason);
+            if let Some(name) = item.name.take() {
+                item.name = Some(clean(&name));
+            }
+            if let Some(lvl) = item.lvl.take() {
+                item.lvl = Some(clean(&lvl));
+            }
+            if let Some(amount) = item.amount.take() {
+                item.amount = Some(clean(&amount));
+            }
+        }
+    }
 }
 
 pub fn merge_with_original(ai_data: &mut Vec<Chapter>, original: &Vec<Chapter>) {

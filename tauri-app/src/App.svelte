@@ -384,26 +384,42 @@
 </div>
 
 <style>
+  @import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap");
+
+  :global(:root) {
+    --bg-1: #0b1116;
+    --bg-2: #17212b;
+    --panel: #121a22;
+    --panel-2: #0f151c;
+    --border: #283644;
+    --accent: #26c6da;
+    --accent-2: #f4a261;
+    --text: #eef3fb;
+    --muted: #b6c0d1;
+    --chip: #1a2530;
+  }
+
   :global(body) {
     margin: 0;
     padding: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: linear-gradient(135deg, #0f1419 0%, #1a1f2e 100%);
-    color: #e6eaf2;
+    font-family: "Space Grotesk", "Segoe UI", sans-serif;
+    background: radial-gradient(1200px 600px at 20% -10%, #1b2a38 0%, var(--bg-1) 50%)
+      , linear-gradient(135deg, var(--bg-1) 0%, var(--bg-2) 100%);
+    color: var(--text);
   }
 
   .shell {
     display: flex;
     flex-direction: column;
     height: 100vh;
-    background: #141826;
+    background: var(--panel-2);
     overflow: hidden;
   }
 
   .hero {
     padding: 20px 24px;
-    background: linear-gradient(135deg, rgba(91, 124, 255, 0.15) 0%, rgba(138, 43, 226, 0.1) 100%);
-    border-bottom: 1px solid rgba(120, 130, 160, 0.2);
+    background: linear-gradient(135deg, rgba(38, 198, 218, 0.18) 0%, rgba(244, 162, 97, 0.12) 100%);
+    border-bottom: 1px solid var(--border);
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -413,13 +429,13 @@
     margin: 0;
     font-size: 24px;
     font-weight: 600;
-    color: #fff;
+    color: var(--text);
   }
 
   .hero p {
     margin: 4px 0 0 0;
     font-size: 13px;
-    color: #aab4cc;
+    color: var(--muted);
   }
 
   .hero-meta {
@@ -428,16 +444,16 @@
   }
 
   .chip {
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid rgba(120, 130, 160, 0.2);
+    background: var(--chip);
+    border: 1px solid var(--border);
     border-radius: 6px;
     padding: 6px 12px;
     font-size: 12px;
-    color: #aab4cc;
+    color: var(--muted);
   }
 
   .chip strong {
-    color: #5b7cff;
+    color: var(--accent);
     font-weight: 600;
   }
 
@@ -445,8 +461,8 @@
     display: flex;
     gap: 8px;
     padding: 12px 24px;
-    background: rgba(0, 0, 0, 0.2);
-    border-bottom: 1px solid rgba(120, 130, 160, 0.1);
+    background: rgba(0, 0, 0, 0.25);
+    border-bottom: 1px solid var(--border);
     overflow-x: auto;
   }
 
@@ -454,7 +470,7 @@
     padding: 8px 16px;
     border: none;
     background: transparent;
-    color: #aab4cc;
+    color: var(--muted);
     border-radius: 6px;
     cursor: pointer;
     transition: all 0.2s;
@@ -463,13 +479,13 @@
   }
 
   nav.tabs button:hover {
-    background: rgba(91, 124, 255, 0.1);
-    color: #e6eaf2;
+    background: rgba(38, 198, 218, 0.12);
+    color: var(--text);
   }
 
   nav.tabs button.active {
-    background: #5b7cff;
-    color: #fff;
+    background: var(--accent);
+    color: #041014;
   }
 
   .page {
@@ -482,8 +498,8 @@
   }
 
   .panel {
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(120, 130, 160, 0.15);
+    background: var(--panel);
+    border: 1px solid var(--border);
     border-radius: 12px;
     padding: 16px;
   }
@@ -492,7 +508,7 @@
     margin: 0 0 12px 0;
     font-size: 16px;
     font-weight: 600;
-    color: #fff;
+    color: var(--text);
   }
 
   .grid-2 {
@@ -510,7 +526,7 @@
   label {
     font-size: 12px;
     font-weight: 500;
-    color: #aab4cc;
+    color: var(--muted);
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
@@ -518,9 +534,9 @@
   input[type="text"],
   input[type="password"],
   select {
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(120, 130, 160, 0.2);
-    color: #e6eaf2;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--border);
+    color: var(--text);
     padding: 8px 12px;
     border-radius: 6px;
     font-size: 13px;
@@ -530,13 +546,13 @@
   input:focus,
   select:focus {
     outline: none;
-    border-color: #5b7cff;
-    background: rgba(255, 255, 255, 0.08);
-    box-shadow: 0 0 0 3px rgba(91, 124, 255, 0.1);
+    border-color: var(--accent);
+    background: rgba(255, 255, 255, 0.12);
+    box-shadow: 0 0 0 3px rgba(38, 198, 218, 0.15);
   }
 
   input:readonly {
-    background: rgba(255, 255, 255, 0.02);
+    background: rgba(255, 255, 255, 0.04);
     cursor: not-allowed;
   }
 
@@ -551,16 +567,16 @@
 
   .btn-icon {
     padding: 8px 12px;
-    background: rgba(91, 124, 255, 0.2);
-    border: 1px solid rgba(91, 124, 255, 0.3);
-    color: #5b7cff;
+    background: rgba(38, 198, 218, 0.25);
+    border: 1px solid rgba(38, 198, 218, 0.35);
+    color: var(--accent);
     border-radius: 6px;
     cursor: pointer;
     transition: all 0.2s;
   }
 
   .btn-icon:hover {
-    background: rgba(91, 124, 255, 0.3);
+    background: rgba(38, 198, 218, 0.35);
   }
 
   .panel-actions {
@@ -582,34 +598,34 @@
   }
 
   .btn-primary {
-    background: linear-gradient(135deg, #5b7cff 0%, #8a2be2 100%);
-    color: #fff;
+    background: linear-gradient(135deg, #26c6da 0%, #2bd4a0 100%);
+    color: #041014;
   }
 
   .btn-primary:hover {
     transform: translateY(-2px);
-    box-shadow: 0 8px 16px rgba(91, 124, 255, 0.3);
+    box-shadow: 0 8px 16px rgba(38, 198, 218, 0.25);
   }
 
   .btn-secondary {
-    background: rgba(255, 255, 255, 0.1);
-    color: #aab4cc;
+    background: rgba(255, 255, 255, 0.12);
+    color: var(--muted);
   }
 
   .btn-secondary:hover {
-    background: rgba(255, 255, 255, 0.15);
-    color: #e6eaf2;
+    background: rgba(255, 255, 255, 0.2);
+    color: var(--text);
   }
 
   .btn-ghost {
     background: transparent;
-    color: #aab4cc;
-    border: 1px solid rgba(120, 130, 160, 0.2);
+    color: var(--muted);
+    border: 1px solid var(--border);
   }
 
   .btn-ghost:hover {
-    color: #e6eaf2;
-    border-color: rgba(120, 130, 160, 0.4);
+    color: var(--text);
+    border-color: rgba(38, 198, 218, 0.4);
   }
 
   .server-selector {
@@ -621,9 +637,9 @@
   .server-btn {
     flex: 1;
     padding: 10px 16px;
-    background: rgba(91, 124, 255, 0.15);
-    border: 1px solid rgba(91, 124, 255, 0.3);
-    color: #5b7cff;
+    background: rgba(38, 198, 218, 0.18);
+    border: 1px solid rgba(38, 198, 218, 0.35);
+    color: var(--accent);
     border-radius: 8px;
     cursor: pointer;
     font-weight: 600;
@@ -631,7 +647,7 @@
   }
 
   .server-btn:hover {
-    background: rgba(91, 124, 255, 0.25);
+    background: rgba(38, 198, 218, 0.28);
   }
 
   .btn-clear {
@@ -650,8 +666,8 @@
   }
 
   .server-popup {
-    background: rgba(0, 0, 0, 0.3);
-    border: 1px solid rgba(120, 130, 160, 0.2);
+    background: rgba(8, 12, 16, 0.7);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 12px;
     margin-top: 8px;
@@ -666,9 +682,9 @@
 
   .quick-btn {
     padding: 8px 12px;
-    background: rgba(91, 124, 255, 0.15);
-    border: 1px solid rgba(91, 124, 255, 0.3);
-    color: #5b7cff;
+    background: rgba(38, 198, 218, 0.18);
+    border: 1px solid rgba(38, 198, 218, 0.35);
+    color: var(--accent);
     border-radius: 6px;
     cursor: pointer;
     font-size: 12px;
@@ -677,12 +693,12 @@
   }
 
   .quick-btn:hover {
-    background: rgba(91, 124, 255, 0.25);
+    background: rgba(38, 198, 218, 0.28);
   }
 
   .popup-divider {
     height: 1px;
-    background: rgba(120, 130, 160, 0.2);
+    background: var(--border);
     margin: 8px 0;
   }
 
@@ -698,7 +714,7 @@
     margin: 0 0 8px 0;
     font-size: 12px;
     font-weight: 600;
-    color: #5b7cff;
+    color: var(--accent);
     text-transform: uppercase;
   }
 
@@ -716,7 +732,7 @@
     width: 16px;
     height: 16px;
     cursor: pointer;
-    accent-color: #5b7cff;
+    accent-color: var(--accent);
   }
 
   .checkbox-label {
@@ -732,7 +748,7 @@
     width: 16px;
     height: 16px;
     cursor: pointer;
-    accent-color: #5b7cff;
+    accent-color: var(--accent);
   }
 
   .progress-box {
@@ -745,19 +761,19 @@
   .progress-label {
     font-size: 12px;
     font-weight: 600;
-    color: #aab4cc;
+    color: var(--muted);
     text-transform: uppercase;
   }
 
   .progress-bar {
-    background: rgba(0, 0, 0, 0.3);
+    background: rgba(0, 0, 0, 0.35);
     border-radius: 4px;
     height: 8px;
     overflow: hidden;
   }
 
   .progress-fill {
-    background: linear-gradient(90deg, #5b7cff 0%, #8a2be2 100%);
+    background: linear-gradient(90deg, #26c6da 0%, #2bd4a0 100%);
     height: 100%;
     transition: width 0.3s;
   }
@@ -765,7 +781,7 @@
   .progress-percent {
     font-size: 12px;
     font-weight: 600;
-    color: #5b7cff;
+    color: var(--accent);
     text-align: right;
   }
 
@@ -777,13 +793,13 @@
 
   .log {
     flex: 1;
-    background: rgba(0, 0, 0, 0.4);
-    border: 1px solid rgba(120, 130, 160, 0.15);
+    background: rgba(7, 10, 13, 0.9);
+    border: 1px solid var(--border);
     border-radius: 6px;
     padding: 10px;
-    font-family: "Monaco", "Courier New", monospace;
+    font-family: "IBM Plex Mono", "Courier New", monospace;
     font-size: 11px;
-    color: #7a8a9e;
+    color: #d8e2f1;
     line-height: 1.5;
     overflow-y: auto;
     white-space: pre-wrap;
@@ -791,8 +807,8 @@
   }
 
   .server-card {
-    background: rgba(0, 0, 0, 0.2);
-    border: 1px solid rgba(120, 130, 160, 0.1);
+    background: rgba(8, 12, 16, 0.55);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 12px;
     margin-bottom: 12px;
@@ -801,7 +817,7 @@
   .card-header {
     font-size: 13px;
     font-weight: 600;
-    color: #5b7cff;
+    color: var(--accent);
     margin-bottom: 12px;
   }
 
