@@ -112,14 +112,32 @@ async fn fetch_via_webview(
     // Listen for navigation events emitted by the window
     let done_event_clone = done_event.clone();
     let _listener = app.listen(done_event_clone, move |event| {
-        // payload is JSON: {"ok":"..."} or {"err":"..."}
-        let v: serde_json::Value = serde_json::from_str(event.payload())
+        let raw = event.payload();
+        eprintln!("  [forum] event payload ({} bytes): {:?}", raw.len(), &raw[..raw.len().min(200)]);
+
+        // Tauri 2 wraps the payload in an extra JSON string layer sometimes.
+        // Try direct parse first, then unwrap one string layer.
+        let v: serde_json::Value = serde_json::from_str(raw)
+            .or_else(|_| {
+                // Maybe payload is a JSON-quoted string: "\"...\""
+                serde_json::from_str::<String>(raw)
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
+            })
             .unwrap_or(serde_json::Value::Null);
-        let result = if let Some(text) = v.get("ok").and_then(|s| s.as_str()) {
+
+        let result = if let Some(b64) = v.get("ok_b64").and_then(|s| s.as_str()) {
+            // Base64-encoded text path
+            let bytes = base64_decode(b64);
+            match String::from_utf8(bytes) {
+                Ok(text) => Ok(text),
+                Err(e) => Err(anyhow!("base64 decode utf8: {e}")),
+            }
+        } else if let Some(text) = v.get("ok").and_then(|s| s.as_str()) {
             Ok(text.to_string())
         } else if let Some(msg) = v.get("err").and_then(|s| s.as_str()) {
             Err(anyhow!("{}", msg))
         } else {
+            eprintln!("  [forum] unrecognized payload structure: {:?}", v);
             Err(anyhow!("bad event payload"))
         };
         *slot_listener.lock().unwrap() = Some(result);
@@ -201,9 +219,22 @@ fn build_init_script(
 
   function sleep(ms) {{ return new Promise(r => setTimeout(r, ms)); }}
 
+  // Encode text as base64 (handles Unicode/Cyrillic safely)
+  function toBase64(str) {{
+    try {{
+      return btoa(unescape(encodeURIComponent(str)));
+    }} catch(e) {{
+      // Fallback: send as-is if btoa fails
+      return str;
+    }}
+  }}
+
   // Send result back to Rust via Tauri IPC
   async function sendResult(obj) {{
-    const payload = JSON.stringify(obj);
+    // Use base64 for text to avoid encoding issues over IPC
+    const payload = obj.ok !== undefined
+      ? JSON.stringify({{ ok_b64: toBase64(obj.ok) }})
+      : JSON.stringify(obj);
     try {{
       // Tauri 2 internal IPC — always available in any WebviewWindow
       await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {{
@@ -491,7 +522,27 @@ fn js_escape(s: &str) -> String {
     }).collect()
 }
 
-fn uuid_short() -> String {
+/// Minimal Base64 decoder (standard alphabet, no external deps).
+fn base64_decode(s: &str) -> Vec<u8> {
+    let table: [u8; 128] = {
+        let mut t = [255u8; 128];
+        for (i, &c) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".iter().enumerate() {
+            t[c as usize] = i as u8;
+        }
+        t
+    };
+    let bytes: Vec<u8> = s.bytes().filter(|&b| b != b'=' && (b as usize) < 128 && table[b as usize] != 255).collect();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        let b: Vec<u8> = chunk.iter().map(|&b| table[b as usize]).collect();
+        if b.len() >= 2 { out.push((b[0] << 2) | (b[1] >> 4)); }
+        if b.len() >= 3 { out.push((b[1] << 4) | (b[2] >> 2)); }
+        if b.len() >= 4 { out.push((b[2] << 6) | b[3]); }
+    }
+    out
+}
+
+
     use std::time::{SystemTime, UNIX_EPOCH};
     let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     format!("{:x}{:x}", t.as_secs(), t.subsec_nanos())
