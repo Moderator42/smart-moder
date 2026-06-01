@@ -354,7 +354,11 @@
           <div>
             <div class="field-label">Пароль</div>
             <div class="row-input">
-              <input class="inp" type={showPw.arizona ? "text" : "password"} bind:value={cfg.arizona.password} autocomplete="new-password" />
+              {#if showPw.arizona}
+                <input class="inp" type="text" bind:value={cfg.arizona.password} autocomplete="new-password" />
+              {:else}
+                <input class="inp" type="password" bind:value={cfg.arizona.password} autocomplete="new-password" />
+              {/if}
               <button class="btn-icon" on:click={() => showPw.arizona = !showPw.arizona}>{showPw.arizona ? "🙈" : "👁"}</button>
             </div>
           </div>
@@ -372,7 +376,11 @@
           <div>
             <div class="field-label">Пароль</div>
             <div class="row-input">
-              <input class="inp" type={showPw.rodina ? "text" : "password"} bind:value={cfg.rodina.password} autocomplete="new-password" />
+              {#if showPw.rodina}
+                <input class="inp" type="text" bind:value={cfg.rodina.password} autocomplete="new-password" />
+              {:else}
+                <input class="inp" type="password" bind:value={cfg.rodina.password} autocomplete="new-password" />
+              {/if}
               <button class="btn-icon" on:click={() => showPw.rodina = !showPw.rodina}>{showPw.rodina ? "🙈" : "👁"}</button>
             </div>
           </div>
