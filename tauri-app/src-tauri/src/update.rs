@@ -6,7 +6,6 @@ use reqwest::StatusCode;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-// use std::path::PathBuf;
 use tauri::{Emitter, Window};
 
 fn log(window: &Window, line: String) -> Result<()> {
@@ -14,7 +13,11 @@ fn log(window: &Window, line: String) -> Result<()> {
 }
 
 fn github_raw_url(mode: &str, server_num: u32) -> String {
-    let num_str = if server_num < 100 { format!("{:02}", server_num) } else { server_num.to_string() };
+    let num_str = if server_num < 100 {
+        format!("{:02}", server_num)
+    } else {
+        server_num.to_string()
+    };
     let base = "https://raw.githubusercontent.com/MTGMODS/arizona-helper/main";
     if mode == "uk" {
         format!("{}/SmartUK/{}/SmartUK.json", base, num_str)
@@ -42,7 +45,11 @@ fn normalize_reason(reason: &str) -> String {
     reason.trim().to_uppercase().replace("  ", " ")
 }
 
-fn diff_summary(old: &[crate::types::Chapter], new: &[crate::types::Chapter], mode: &str) -> (Vec<String>, Vec<String>) {
+fn diff_summary(
+    old: &[crate::types::Chapter],
+    new: &[crate::types::Chapter],
+    mode: &str,
+) -> (Vec<String>, Vec<String>) {
     use std::collections::HashMap;
 
     let mut old_items: HashMap<String, crate::types::Item> = HashMap::new();
@@ -92,28 +99,38 @@ fn diff_summary(old: &[crate::types::Chapter], new: &[crate::types::Chapter], mo
     (added, changed)
 }
 
-fn format_changelog(mode: &str, added: &[String], changed: &[String], server_num: u32) -> String {
-    let fmt = |lst: &[String]| -> String {
-        lst.iter()
-            .map(|r| {
-                r.to_lowercase()
-                    .replace("ук", "УК")
-                    .replace("ак", "АК")
-                    .replace("пдд", "ПДД")
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
+fn fmt_reasons(lst: &[String]) -> String {
+    lst.iter()
+        .map(|r| {
+            let lower = r.to_lowercase();
+            lower
+                .replace("ук", "УК")
+                .replace("ак", "АК")
+                .replace("пдд", "ПДД")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
+fn format_changelog(mode: &str, added: &[String], changed: &[String], server_num: u32) -> String {
     if mode == "uk" {
-        let mut lines = vec!["УК:".to_string(), "Проведена сверка УК с актуальной инфой,  ".to_string()];
+        let mut lines = vec![
+            "УК:".to_string(),
+            "Проведена сверка УК с актуальной инфой,  ".to_string(),
+        ];
         if !added.is_empty() {
-            lines.push(format!("Добавлены пропущенные главы и статьи: {},  ", fmt(added)));
+            lines.push(format!(
+                "Добавлены пропущенные главы и статьи: {},  ",
+                fmt_reasons(added)
+            ));
         }
         if !changed.is_empty() {
-            lines.push(format!("Обновлены статьи: {},  ", fmt(changed)));
+            lines.push(format!("Обновлены статьи: {},  ", fmt_reasons(changed)));
         }
-        lines.push(format!("Убраны расхождения между кодом и актуальным УК {} сервера", server_num));
+        lines.push(format!(
+            "Убраны расхождения между кодом и актуальным УК {} сервера",
+            server_num
+        ));
         lines.join("\n")
     } else {
         let mut lines = vec![
@@ -123,12 +140,18 @@ fn format_changelog(mode: &str, added: &[String], changed: &[String], server_num
             "АК добавлен и приведен к актуальной редакции,  ".to_string(),
         ];
         if !added.is_empty() {
-            lines.push(format!("Добавлены статьи: {},  ", fmt(added)));
+            lines.push(format!("Добавлены статьи: {},  ", fmt_reasons(added)));
         }
         if !changed.is_empty() {
-            lines.push(format!("Исправлены суммы штрафов и тексты статей ({}),  ", fmt(&changed[..changed.len().min(10)])));
+            lines.push(format!(
+                "Исправлены суммы штрафов и тексты статей ({}),  ",
+                fmt_reasons(&changed[..changed.len().min(10)])
+            ));
         }
-        lines.push(format!("Убраны расхождения между кодом и актуальными ДК/АК {} сервера", server_num));
+        lines.push(format!(
+            "Убраны расхождения между кодом и актуальными ДК/АК {} сервера",
+            server_num
+        ));
         lines.join("\n")
     }
 }
@@ -143,7 +166,7 @@ pub async fn run_update(
 
     if mode == "both" {
         log(window, format!("Start: server {server_num}, mode both"))?;
-        run_update_mode(window, &cfg, server_num, "uk", skip_login).await?;
+        run_update_mode(window, &cfg, server_num, "uk",  skip_login).await?;
         run_update_mode(window, &cfg, server_num, "pdd", skip_login).await?;
         log(window, format!("Completed: server {server_num}, mode both"))?;
         return Ok(());
@@ -179,121 +202,184 @@ async fn run_update_mode(
         (&cfg.arizona.login, &cfg.arizona.password)
     };
 
-    // Fetch forum text (static + headless fallback)
+    // ── Check that forum URL is configured ──────────────────────────────────
+    let has_url = match mode {
+        "uk"  => !links.forum_uk_url.trim().is_empty(),
+        "pdd" => !links.forum_pdd_url.trim().is_empty(),
+        _     => false,
+    };
+    if !has_url {
+        log(window, format!("⚠ Нет ссылки на форум для сервера {server_num} / режим {mode} — пропускаю"))?;
+        log(window, format!("  Открой вкладку «Серверы», введи ссылку и сохрани конфиг"))?;
+        log(window, format!("Completed: server {server_num}, mode {mode}"))?;
+        return Ok(());
+    }
+
+    // ── Fetch forum text ────────────────────────────────────────────────────
     log(window, "Fetching forum page...".to_string())?;
-    let forum_text = match forum::fetch_with_fallback(&links, mode, login, password, skip_login).await {
-        Ok(t) => t,
+    let forum_text = match forum::fetch_with_fallback(
+        &links, mode, login, password, skip_login,
+    )
+    .await
+    {
+        Ok(t) => {
+            log(window, format!("  Спарсено {} символов", t.len()))?;
+            t
+        }
         Err(e) => {
             log(window, format!("Forum fetch failed: {e}"))?;
             String::new()
         }
     };
 
+    // Save raw forum text for debugging
     let forum_path = server_dir.join(format!("forum_raw_{}.txt", mode));
-    fs::write(&forum_path, forum_text.as_bytes())?;
-    log(window, format!("Saved forum text -> {}", forum_path.display()))?;
+    if let Err(e) = fs::write(&forum_path, forum_text.as_bytes()) {
+        log(window, format!("⚠ Не удалось сохранить forum_raw: {e}"))?;
+    } else {
+        log(window, format!("Saved forum text -> {}", forum_path.display()))?;
+    }
 
+    // ── Guard: if forum text is too short, warn but still continue ──────────
+    // (AI will keep existing JSON mostly unchanged if it gets no new text)
+    if forum_text.trim().len() < 200 {
+        log(window, "⚠ Текст форума слишком короткий — возможно, не удалось авторизоваться".to_string())?;
+        log(window, "  Проверь логин/пароль или включи «Пропустить логин» если форум открыт без авторизации".to_string())?;
+    }
+
+    // ── Download base JSON from GitHub ──────────────────────────────────────
     let url = github_raw_url(mode, server_num);
     log(window, format!("Downloading JSON from {}", url))?;
-    match reqwest::get(&url).await {
-        Ok(resp) => {
-            if resp.status() == StatusCode::NOT_FOUND {
-                log(window, format!("JSON not found on GitHub for server {server_num} ({mode})"))?;
-            } else if resp.status().is_success() {
-                let bytes = resp.bytes().await.unwrap_or_default();
-                let decoded = String::from_utf8(bytes.to_vec())
-                    .ok()
-                    .or_else(|| {
-                        let (cow, _, had_errors) = WINDOWS_1251.decode(&bytes);
-                        if had_errors { None } else { Some(cow.to_string()) }
-                    });
 
-                if let Some(s) = decoded {
-                    let filename = if mode == "uk" { "SmartUK.json" } else { "SmartPDD.json" };
-                    let dest = server_dir.join(filename);
-                    backup_file(&dest)?;
-                    write_cp1251(&dest, &s)?;
-                    log(window, format!("Downloaded JSON -> {}", dest.display()))?;
-
-                    let original_chapters = serde_json::from_str::<Vec<crate::types::Chapter>>(&s).ok();
-
-                    log(window, "Calling AI to generate updated JSON...".to_string())?;
-                    let ai_response = match crate::ai::call_ai(&cfg.ai, mode, &forum_text, &s).await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            log(window, format!("AI error: {e}"))?;
-                            String::new()
-                        }
-                    };
-
-                    let mut updated_json: Option<Vec<crate::types::Chapter>> = None;
-
-                    if !ai_response.is_empty() {
-                        match crate::merge::parse_ai_json(&ai_response) {
-                            Ok(parsed) => {
-                                let processed = crate::merge::postprocess(mode, parsed, original_chapters.as_ref());
-                                let mut processed = crate::merge::add_updated_at(processed);
-                                crate::merge::sanitize_strings(&mut processed);
-                                if let Ok(out_json) = crate::merge::serialize_output(&processed) {
-                                    backup_file(&dest)?;
-                                    write_cp1251(&dest, &out_json)?;
-                                    log(window, format!("Saved merged JSON -> {}", dest.display()))?;
-                                    updated_json = Some(processed);
-                                }
-                            }
-                            Err(e) => {
-                                log(window, format!("AI returned invalid JSON: {e}"))?;
-                            }
-                        }
-                    }
-
-                    if let Some(updated) = updated_json {
-                        if let Some(original) = original_chapters.as_ref() {
-                            let (added, changed) = diff_summary(original, &updated, mode);
-                            log(window, format!("Новых статей: +{}", added.len()))?;
-                            if !added.is_empty() {
-                                log(window, format!("-> {}", added.iter().take(20).cloned().collect::<Vec<_>>().join(", ")))?;
-                            }
-                            log(window, format!("Обновлено значений: {}", changed.len()))?;
-                            if !changed.is_empty() {
-                                log(window, format!("-> {}", changed.iter().take(20).cloned().collect::<Vec<_>>().join(", ")))?;
-                            }
-
-                            let changelog = format_changelog(mode, &added, &changed, server_num);
-                            let cl_path = output_root.join(format!("changelog_{}_{}.txt", server_num, mode));
-                            fs::write(&cl_path, format!("{}\n", changelog))?;
-                            log(window, format!("Changelog -> {}", cl_path.display()))?;
-
-                            log(window, "Verifying saved file...".to_string())?;
-                            if let Ok(saved_raw) = fs::read(&dest) {
-                                let saved_text = String::from_utf8(saved_raw.clone())
-                                    .ok()
-                                    .or_else(|| {
-                                        let (cow, _, had_errors) = WINDOWS_1251.decode(&saved_raw);
-                                        if had_errors { None } else { Some(cow.to_string()) }
-                                    });
-                                if let Some(text) = saved_text {
-                                    if let Ok(saved_data) = serde_json::from_str::<Vec<crate::types::Chapter>>(&text) {
-                                        let has_updated_at = saved_data.iter().any(|e| e.name == "##updated_at");
-                                        if has_updated_at {
-                                            log(window, "##updated_at присутствует".to_string())?;
-                                        } else {
-                                            log(window, "##updated_at не найден".to_string())?;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    log(window, "Downloaded JSON but failed decode as UTF-8".to_string())?;
-                }
-            } else {
-                log(window, format!("Failed to download JSON: {}", resp.status()))?;
-            }
-        }
+    let resp = match reqwest::get(&url).await {
+        Ok(r) => r,
         Err(e) => {
             log(window, format!("HTTP error while downloading JSON: {e}"))?;
+            log(window, format!("Completed: server {server_num}, mode {mode}"))?;
+            return Ok(());
+        }
+    };
+
+    if resp.status() == StatusCode::NOT_FOUND {
+        log(window, format!("JSON not found on GitHub for server {server_num} ({mode})"))?;
+        log(window, format!("Completed: server {server_num}, mode {mode}"))?;
+        return Ok(());
+    }
+
+    if !resp.status().is_success() {
+        log(window, format!("Failed to download JSON: {}", resp.status()))?;
+        log(window, format!("Completed: server {server_num}, mode {mode}"))?;
+        return Ok(());
+    }
+
+    let bytes = resp.bytes().await.unwrap_or_default();
+    let decoded = String::from_utf8(bytes.to_vec()).ok().or_else(|| {
+        let (cow, _, had_errors) = WINDOWS_1251.decode(&bytes);
+        if had_errors { None } else { Some(cow.to_string()) }
+    });
+
+    let json_str = match decoded {
+        Some(s) => s,
+        None => {
+            log(window, "Downloaded JSON but failed to decode (not UTF-8 or cp1251)".to_string())?;
+            log(window, format!("Completed: server {server_num}, mode {mode}"))?;
+            return Ok(());
+        }
+    };
+
+    let filename = if mode == "uk" { "SmartUK.json" } else { "SmartPDD.json" };
+    let dest = server_dir.join(filename);
+    backup_file(&dest)?;
+    write_cp1251(&dest, &json_str)?;
+    log(window, format!("Downloaded JSON -> {}", dest.display()))?;
+
+    let original_chapters = serde_json::from_str::<Vec<crate::types::Chapter>>(&json_str).ok();
+
+    // ── Call AI ─────────────────────────────────────────────────────────────
+    log(window, "Calling AI to generate updated JSON...".to_string())?;
+    let ai_response = match crate::ai::call_ai(&cfg.ai, mode, &forum_text, &json_str).await {
+        Ok(r) => r,
+        Err(e) => {
+            log(window, format!("AI error: {e}"))?;
+            String::new()
+        }
+    };
+
+    let mut updated_json: Option<Vec<crate::types::Chapter>> = None;
+
+    if !ai_response.is_empty() {
+        match crate::merge::parse_ai_json(&ai_response) {
+            Ok(parsed) => {
+                let processed =
+                    crate::merge::postprocess(mode, parsed, original_chapters.as_ref());
+
+                // ── Sanity check: reject suspiciously empty results ──────────
+                let item_count: usize = processed.iter().map(|c| c.item.len()).sum();
+                let original_count: usize = original_chapters
+                    .as_ref()
+                    .map(|o| o.iter().map(|c| c.item.len()).sum())
+                    .unwrap_or(0);
+
+                if item_count == 0 {
+                    log(window, "⚠ AI вернул пустой результат — сохранение отменено, файл не изменён".to_string())?;
+                } else if original_count > 0 && item_count < original_count / 3 {
+                    log(window, format!(
+                        "⚠ AI вернул подозрительно мало статей ({} из {}), сохранение отменено",
+                        item_count, original_count
+                    ))?;
+                } else {
+                    let mut processed = crate::merge::add_updated_at(processed);
+                    crate::merge::sanitize_strings(&mut processed);
+                    if let Ok(out_json) = crate::merge::serialize_output(&processed) {
+                        backup_file(&dest)?;
+                        write_cp1251(&dest, &out_json)?;
+                        log(window, format!("Saved merged JSON -> {}", dest.display()))?;
+                        updated_json = Some(processed);
+                    }
+                }
+            }
+            Err(e) => {
+                log(window, format!("AI returned invalid JSON: {e}"))?;
+            }
+        }
+    }
+
+    // ── Diff + changelog ────────────────────────────────────────────────────
+    if let Some(updated) = updated_json {
+        if let Some(original) = original_chapters.as_ref() {
+            let (added, changed) = diff_summary(original, &updated, mode);
+            log(window, format!("Новых статей: +{}", added.len()))?;
+            if !added.is_empty() {
+                log(window, format!("  -> {}", added.iter().take(20).cloned().collect::<Vec<_>>().join(", ")))?;
+            }
+            log(window, format!("Обновлено значений: {}", changed.len()))?;
+            if !changed.is_empty() {
+                log(window, format!("  -> {}", changed.iter().take(20).cloned().collect::<Vec<_>>().join(", ")))?;
+            }
+
+            let changelog = format_changelog(mode, &added, &changed, server_num);
+            let cl_path = output_root.join(format!("changelog_{}_{}.txt", server_num, mode));
+            fs::write(&cl_path, format!("{}\n", changelog))?;
+            log(window, format!("Changelog -> {}", cl_path.display()))?;
+        }
+
+        // ── Verify saved file ────────────────────────────────────────────────
+        log(window, "Verifying saved file...".to_string())?;
+        if let Ok(saved_raw) = fs::read(&dest) {
+            let saved_text = String::from_utf8(saved_raw.clone()).ok().or_else(|| {
+                let (cow, _, had_errors) = WINDOWS_1251.decode(&saved_raw);
+                if had_errors { None } else { Some(cow.to_string()) }
+            });
+            if let Some(text) = saved_text {
+                if let Ok(saved_data) = serde_json::from_str::<Vec<crate::types::Chapter>>(&text) {
+                    let has_ts = saved_data.iter().any(|e| e.name == "##updated_at");
+                    if has_ts {
+                        log(window, "##updated_at присутствует".to_string())?;
+                    } else {
+                        log(window, "##updated_at не найден".to_string())?;
+                    }
+                }
+            }
         }
     }
 

@@ -5,835 +5,898 @@
   import { open as openShell } from "@tauri-apps/plugin-shell";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
-  type ServerInfo = { id: number; project: string };
+  type ServerLinks = {
+    forum_uk_url: string;
+    forum_uk_url_2: string;
+    forum_pdd_url: string;
+    forum_pdd_url_2: string;
+  };
+
   type Config = {
     arizona: { login: string; password: string };
     rodina: { login: string; password: string };
-    servers: Record<string, { 
-      forum_uk_url: string; 
-      forum_uk_url_2: string;
-      forum_pdd_url: string; 
-      forum_pdd_url_2: string;
-    }>;
+    servers: Record<string, ServerLinks>;
     output_dir: string;
     ai: {
       provider: string;
+      openai_api_keys: string[];
       openai_api_key: string;
       openai_model: string;
+      gemini_api_keys: string[];
       gemini_api_key: string;
       gemini_model: string;
     };
   };
 
-  type ProgressPayload = { step: string; percent: number };
-
-  let configPath = "";
-  let servers: ServerInfo[] = [];
-  let cfg: Config = {
+  const emptyConfig = (): Config => ({
     arizona: { login: "", password: "" },
-    rodina: { login: "", password: "" },
+    rodina:  { login: "", password: "" },
     servers: {},
     output_dir: "",
     ai: {
       provider: "gemini",
+      openai_api_keys: [""],
       openai_api_key: "",
       openai_model: "gpt-4.1-mini",
+      gemini_api_keys: [""],
       gemini_api_key: "",
-      gemini_model: "gemini-2.0-flash"
-    }
-  };
-  
-  let logText = "";
+      gemini_model: "gemini-2.0-flash",
+    },
+  });
+
+  // ── State ──────────────────────────────────────────────────────────────────
+  let cfg: Config = emptyConfig();
+  let configPath = "";
+  let logLines: { text: string; kind: "info" | "ok" | "err" | "warn" }[] = [];
   let selectedServers = new Set<number>();
   let mode: "uk" | "pdd" | "both" = "both";
-  let progress = 0;
-  let progressStep = "idle";
   let skipLogin = false;
-  let activeTab: "config" | "run" | "servers" = "config";
-  let showServerPopup = false;
+  let running = false;
+  let activeTab: "run" | "config" | "servers" | "ai" = "run";
+  let serverSearch = "";
+  let expandedServer: string | null = null;
+  let showPw = { arizona: false, rodina: false };
 
-  // Константы серверов (по старому приложению)
-  const ARIZONA_PC = Array.from({ length: 32 }, (_, i) => i + 1);
-  const ARIZONA_MOBILE = [101, 102, 103];
-  const ARIZONA_VC = [200];
-  const RODINA_PC = Array.from({ length: 7 }, (_, i) => i + 301);
-  const RODINA_MOBILE = [401, 402];
+  // ── Server constants ───────────────────────────────────────────────────────
+  const AZ_PC     = Array.from({ length: 32 }, (_, i) => i + 1);
+  const AZ_MOBILE = [101, 102, 103];
+  const AZ_VC     = [200];
+  const RD_PC     = Array.from({ length: 7 },  (_, i) => i + 301);
+  const RD_MOBILE = [401, 402];
 
-  const ALL_SERVERS = [...ARIZONA_PC, ...ARIZONA_MOBILE, ...ARIZONA_VC, ...RODINA_PC, ...RODINA_MOBILE];
+  const SERVER_GROUPS = [
+    { label: "Arizona PC",     servers: AZ_PC,     project: "arizona" },
+    { label: "Arizona Mobile", servers: AZ_MOBILE, project: "arizona" },
+    { label: "Arizona VC",     servers: AZ_VC,     project: "arizona" },
+    { label: "Rodina PC",      servers: RD_PC,     project: "rodina"  },
+    { label: "Rodina Mobile",  servers: RD_MOBILE, project: "rodina"  },
+  ];
 
-  const appendLog = (line: string) => {
-    logText += line + "\n";
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  const log = (text: string, kind: "info" | "ok" | "err" | "warn" = "info") => {
+    logLines = [...logLines, { text, kind }];
+    // auto-scroll
+    setTimeout(() => {
+      const el = document.getElementById("log-box");
+      if (el) el.scrollTop = el.scrollHeight;
+    }, 20);
   };
 
+  const clearLog = () => { logLines = []; };
+
+  const getServerLink = (id: number, field: keyof ServerLinks): string =>
+    cfg.servers[String(id)]?.[field] ?? "";
+
+  const setServerLink = (id: number, field: keyof ServerLinks, val: string) => {
+    if (!cfg.servers[String(id)]) {
+      cfg.servers[String(id)] = { forum_uk_url: "", forum_uk_url_2: "", forum_pdd_url: "", forum_pdd_url_2: "" };
+    }
+    cfg.servers[String(id)][field] = val;
+    cfg = cfg; // trigger reactivity
+  };
+
+  // Ensure ai.gemini_api_keys / openai_api_keys are arrays (from old configs)
+  const normalizeCfg = (c: Config): Config => {
+    if (!Array.isArray(c.ai.gemini_api_keys) || c.ai.gemini_api_keys.length === 0) {
+      c.ai.gemini_api_keys = c.ai.gemini_api_key ? [c.ai.gemini_api_key] : [""];
+    }
+    if (!Array.isArray(c.ai.openai_api_keys) || c.ai.openai_api_keys.length === 0) {
+      c.ai.openai_api_keys = c.ai.openai_api_key ? [c.ai.openai_api_key] : [""];
+    }
+    return c;
+  };
+
+  const addKey = (provider: "gemini" | "openai") => {
+    const arr = provider === "gemini" ? cfg.ai.gemini_api_keys : cfg.ai.openai_api_keys;
+    arr.push("");
+    cfg = cfg;
+  };
+  const removeKey = (provider: "gemini" | "openai", idx: number) => {
+    const arr = provider === "gemini" ? cfg.ai.gemini_api_keys : cfg.ai.openai_api_keys;
+    if (arr.length > 1) { arr.splice(idx, 1); cfg = cfg; }
+  };
+
+  // ── Load / Save ─────────────────────────────────────────────────────────────
   const loadAll = async () => {
     try {
-      cfg = (await invoke("load_config")) as Config;
-      servers = (await invoke("get_servers")) as ServerInfo[];
+      cfg = normalizeCfg((await invoke("load_config")) as Config);
       configPath = (await invoke("get_config_path")) as string;
-    } catch (error) {
-      appendLog(`Failed to load config: ${error}`);
+    } catch (e) {
+      log(`Ошибка загрузки конфига: ${e}`, "err");
     }
   };
 
   const save = async () => {
-    await invoke("save_config", { config: cfg });
-    appendLog("✓ Saved config.json");
-  };
-
-  const reload = async () => {
-    await loadAll();
-    appendLog("✓ Reloaded config.json");
-  };
-
-  const openConfig = async () => {
-    if (!configPath) return;
-    await openShell(configPath);
+    try {
+      // Sync legacy single-key field so Rust doesn't lose it
+      cfg.ai.gemini_api_key  = cfg.ai.gemini_api_keys[0]  ?? "";
+      cfg.ai.openai_api_key  = cfg.ai.openai_api_keys[0]  ?? "";
+      await invoke("save_config", { config: cfg });
+      log("✓ Конфиг сохранён", "ok");
+    } catch (e) {
+      log(`Ошибка сохранения: ${e}`, "err");
+    }
   };
 
   const pickOutputDir = async () => {
-    const result = await openDialog({ directory: true, multiple: false, title: "Select output folder" });
+    const result = await openDialog({ directory: true, multiple: false, title: "Выбери папку вывода" });
     if (typeof result === "string") {
       cfg.output_dir = result;
-      appendLog(`Output dir: ${result}`);
+      cfg = cfg;
     }
   };
 
+  // ── Server selection ────────────────────────────────────────────────────────
   const toggleServer = (id: number) => {
-    if (selectedServers.has(id)) {
-      selectedServers.delete(id);
-    } else {
-      selectedServers.add(id);
-    }
+    selectedServers.has(id) ? selectedServers.delete(id) : selectedServers.add(id);
     selectedServers = selectedServers;
   };
+  const selectGroup = (ids: number[]) => { selectedServers = new Set(ids); };
+  const selectAll   = () => { selectedServers = new Set(SERVER_GROUPS.flatMap(g => g.servers)); };
+  const clearSel    = () => { selectedServers = new Set(); };
 
-  const selectGroup = (group: number[]) => {
-    selectedServers = new Set(group);
-  };
-
-  const clearServers = () => {
-    selectedServers = new Set();
-  };
-
+  // ── Run update ──────────────────────────────────────────────────────────────
   const runUpdate = async () => {
-    if (selectedServers.size === 0) {
-      appendLog("No servers selected");
-      return;
-    }
+    if (selectedServers.size === 0) { log("Не выбраны серверы!", "warn"); return; }
+    running = true;
+    activeTab = "run";
+    log(`▶ Запуск: ${selectedServers.size} серв., режим=${mode.toUpperCase()}`);
 
-    progress = 0;
-    progressStep = "starting";
-    appendLog(`Update start: ${selectedServers.size} server(s), mode=${mode}`);
-    
-    for (const serverId of Array.from(selectedServers).sort((a, b) => a - b)) {
+    for (const id of Array.from(selectedServers).sort((a, b) => a - b)) {
       try {
-        await invoke("run_update", {
-          serverNum: serverId,
-          mode,
-          skipLogin
-        });
-        appendLog(`✓ Server ${serverId} done`);
+        await invoke("run_update", { serverNum: id, mode, skipLogin });
+        log(`✓ Сервер ${id} готов`, "ok");
       } catch (e) {
-        appendLog(`✗ Server ${serverId}: ${e}`);
+        log(`✗ Сервер ${id}: ${e}`, "err");
       }
     }
+
+    log("■ Обновление завершено", "ok");
+    running = false;
   };
 
-  const getSelectedLabel = () => {
-    if (selectedServers.size === 0) return "🖥  No servers  ▾";
-    if (selectedServers.size === 1) return `🖥  Server ${Array.from(selectedServers)[0]}  ▾`;
-    return `🖥  ${selectedServers.size} servers  ▾`;
-  };
+  // ── Filtered server list for Servers tab ────────────────────────────────────
+  $: filteredGroups = serverSearch.trim()
+    ? SERVER_GROUPS.map(g => ({
+        ...g,
+        servers: g.servers.filter(id => String(id).includes(serverSearch.trim()))
+      })).filter(g => g.servers.length > 0)
+    : SERVER_GROUPS;
 
+  // ── Mount ────────────────────────────────────────────────────────────────────
   onMount(async () => {
     await loadAll();
 
-    const unlistenLog = await listen<string>("log", (event) => {
-      appendLog(event.payload);
+    const unsub1 = await listen<string>("log", e => {
+      const txt = e.payload;
+      const kind = txt.startsWith("✓") || txt.startsWith("Saved") ? "ok"
+                 : txt.startsWith("✗") || txt.toLowerCase().includes("error") || txt.toLowerCase().includes("failed") ? "err"
+                 : txt.startsWith("⚠") ? "warn"
+                 : "info";
+      log(txt, kind);
     });
 
-    const unlistenProgress = await listen<ProgressPayload>("progress", (event) => {
-      progressStep = event.payload.step;
-      progress = event.payload.percent;
-    });
-
-    return () => {
-      unlistenLog();
-      unlistenProgress();
-    };
+    return () => { unsub1(); };
   });
 </script>
 
-<div class="shell">
-  <header class="hero">
-    <div>
-      <h1>⚙️ Smart Config Editor</h1>
-      <p>AI-powered SmartUK/SmartPDD updates with smart forum parsing.</p>
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+
+<div class="app">
+
+  <!-- ── Sidebar ─────────────────────────────────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="logo">
+      <span class="logo-icon">⚙</span>
+      <span class="logo-text">Smart Config</span>
     </div>
-    <div class="hero-meta">
-      <span class="chip">Config: {configPath.split("/").pop() || "—"}</span>
-      <span class="chip">Mode: <strong>{mode.toUpperCase()}</strong></span>
+
+    <nav>
+      {#each [
+        { id: "run",     icon: "▶", label: "Запуск"    },
+        { id: "config",  icon: "🔑", label: "Настройки" },
+        { id: "servers", icon: "🖥", label: "Серверы"   },
+        { id: "ai",      icon: "🤖", label: "AI"        },
+      ] as tab}
+        <button
+          class="nav-btn"
+          class:active={activeTab === tab.id}
+          on:click={() => (activeTab = tab.id as any)}
+        >
+          <span class="nav-icon">{tab.icon}</span>
+          <span>{tab.label}</span>
+        </button>
+      {/each}
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="cfg-path" title={configPath}>{configPath.split("/").pop() || "config.json"}</div>
     </div>
-  </header>
+  </aside>
 
-  <nav class="tabs">
-    <button class:active={activeTab === "config"} on:click={() => (activeTab = "config")}>⚙️  Settings</button>
-    <button class:active={activeTab === "run"} on:click={() => (activeTab = "run")}>▶️  Run</button>
-    <button class:active={activeTab === "servers"} on:click={() => (activeTab = "servers")}>🖥️  Servers</button>
-  </nav>
+  <!-- ── Main ────────────────────────────────────────────────────────────── -->
+  <main>
 
-  <div class="page">
-    {#if activeTab === "config"}
-      <div class="panel">
-        <h2>Login Credentials</h2>
-        <div class="grid-2">
-          <div>
-            <label for="az-login">Arizona login</label>
-            <input id="az-login" bind:value={cfg.arizona.login} placeholder="admin" />
-          </div>
-          <div>
-            <label for="az-pass">Arizona password</label>
-            <input id="az-pass" type="password" bind:value={cfg.arizona.password} />
-          </div>
-          <div>
-            <label for="rd-login">Rodina login</label>
-            <input id="rd-login" bind:value={cfg.rodina.login} placeholder="admin" />
-          </div>
-          <div>
-            <label for="rd-pass">Rodina password</label>
-            <input id="rd-pass" type="password" bind:value={cfg.rodina.password} />
-          </div>
-        </div>
-      </div>
-
-      <div class="panel">
-        <h2>AI Settings</h2>
-        <div class="grid-2">
-          <div>
-            <label for="provider">Provider</label>
-            <select id="provider" bind:value={cfg.ai.provider}>
-              <option value="openai">OpenAI</option>
-              <option value="gemini">Gemini</option>
-            </select>
-          </div>
-          <div>
-            <label for="output-dir">Output dir</label>
-            <div class="input-group">
-              <input id="output-dir" bind:value={cfg.output_dir} placeholder="app folder" readonly />
-              <button class="btn-icon" on:click={pickOutputDir} title="Browse">📂</button>
-            </div>
-          </div>
-        </div>
-
-        {#if cfg.ai.provider === "openai"}
-          <div class="grid-2">
-            <div>
-              <label for="openai-key">OpenAI API key</label>
-              <input id="openai-key" type="password" bind:value={cfg.ai.openai_api_key} />
-            </div>
-            <div>
-              <label for="openai-model">OpenAI model</label>
-              <input id="openai-model" bind:value={cfg.ai.openai_model} />
-            </div>
-          </div>
-        {:else}
-          <div class="grid-2">
-            <div>
-              <label for="gemini-key">Gemini API key</label>
-              <input id="gemini-key" type="password" bind:value={cfg.ai.gemini_api_key} />
-            </div>
-            <div>
-              <label for="gemini-model">Gemini model</label>
-              <input id="gemini-model" bind:value={cfg.ai.gemini_model} />
-            </div>
-          </div>
-        {/if}
-      </div>
-
-      <div class="panel-actions">
-        <button class="btn-primary" on:click={save}>💾  Save</button>
-        <button class="btn-secondary" on:click={reload}>🔄  Reload</button>
-        <button class="btn-ghost" on:click={openConfig}>📄  Open config.json</button>
-      </div>
-    {/if}
-
+    <!-- ════════════ RUN TAB ════════════ -->
     {#if activeTab === "run"}
-      <div class="panel">
-        <h2>Server Selector</h2>
-        <div class="server-selector">
-          <button class="server-btn" on:click={() => (showServerPopup = !showServerPopup)}>
-            {getSelectedLabel()}
-          </button>
-          <button class="btn-clear" on:click={clearServers} title="Clear selection">✕</button>
+      <div class="page-title">Запуск обновления</div>
+
+      <div class="run-top">
+
+        <!-- Mode -->
+        <div class="card">
+          <div class="card-label">Режим</div>
+          <div class="mode-row">
+            {#each [["uk","УК"],["pdd","ПДД"],["both","Оба"]] as [val, lbl]}
+              <button
+                class="mode-btn"
+                class:selected={mode === val}
+                on:click={() => mode = val as any}
+              >{lbl}</button>
+            {/each}
+          </div>
         </div>
 
-        {#if showServerPopup}
-          <div class="server-popup">
-            <div class="popup-row">
-              <button class="quick-btn" on:click={() => selectGroup([...ARIZONA_PC, ...ARIZONA_MOBILE, ...ARIZONA_VC])}>Arizona</button>
-              <button class="quick-btn" on:click={() => selectGroup(ARIZONA_MOBILE)}>Mobile</button>
-              <button class="quick-btn" on:click={() => selectGroup([...RODINA_PC, ...RODINA_MOBILE])}>Rodina</button>
-              <button class="quick-btn" on:click={() => selectGroup(ALL_SERVERS)}>All</button>
-            </div>
-            
-            <div class="popup-divider"></div>
-
-            <div class="popup-content">
-              <div class="server-column">
-                <h4>Arizona PC (1–32)</h4>
-                {#each ARIZONA_PC as id}
-                  <label class="checkbox">
-                    <input type="checkbox" checked={selectedServers.has(id)} on:change={() => toggleServer(id)} />
-                    <span>{id}</span>
-                  </label>
-                {/each}
-              </div>
-
-              <div class="server-column">
-                <h4>Arizona Mobile & VC</h4>
-                {#each [...ARIZONA_MOBILE, ...ARIZONA_VC] as id}
-                  <label class="checkbox">
-                    <input type="checkbox" checked={selectedServers.has(id)} on:change={() => toggleServer(id)} />
-                    <span>{id}</span>
-                  </label>
-                {/each}
-              </div>
-
-              <div class="server-column">
-                <h4>Rodina PC & Mobile</h4>
-                {#each [...RODINA_PC, ...RODINA_MOBILE] as id}
-                  <label class="checkbox">
-                    <input type="checkbox" checked={selectedServers.has(id)} on:change={() => toggleServer(id)} />
-                    <span>{id}</span>
-                  </label>
-                {/each}
-              </div>
-            </div>
-          </div>
-        {/if}
-      </div>
-
-      <div class="panel">
-        <h2>Update Settings</h2>
-        <div class="grid-2">
-          <div>
-            <label for="mode">Mode</label>
-            <select id="mode" bind:value={mode}>
-              <option value="uk">UK only</option>
-              <option value="pdd">PDD only</option>
-              <option value="both">Both UK & PDD</option>
-            </select>
-          </div>
-          <label class="checkbox-label" for="skip-login">
-            <input id="skip-login" type="checkbox" bind:checked={skipLogin} />
-            <span>Skip login (if not required)</span>
+        <!-- Options -->
+        <div class="card">
+          <div class="card-label">Опции</div>
+          <label class="toggle-row">
+            <input type="checkbox" bind:checked={skipLogin} />
+            <span>Пропустить логин на форуме</span>
           </label>
         </div>
-      </div>
 
-      <div class="panel-actions">
-        <button class="btn-primary" on:click={runUpdate}>▶️  RUN UPDATE</button>
-      </div>
-
-      <div class="panel">
-        <h2>Progress</h2>
-        <div class="progress-box">
-          <div class="progress-label">{progressStep}</div>
-          <div class="progress-bar">
-            <div class="progress-fill" style={`width: ${progress}%`}></div>
+        <!-- Server selection -->
+        <div class="card card-wide">
+          <div class="card-label">Серверы</div>
+          <div class="sel-actions">
+            {#each SERVER_GROUPS as g}
+              <button class="sel-btn" on:click={() => selectGroup(g.servers)}>{g.label}</button>
+            {/each}
+            <button class="sel-btn" on:click={selectAll}>Все</button>
+            <button class="sel-btn red" on:click={clearSel}>Очистить</button>
           </div>
-          <div class="progress-percent">{progress}%</div>
+
+          <div class="server-chips">
+            {#each SERVER_GROUPS as g}
+              {#each g.servers as id}
+                <button
+                  class="chip"
+                  class:on={selectedServers.has(id)}
+                  on:click={() => toggleServer(id)}
+                >{id}</button>
+              {/each}
+            {/each}
+          </div>
+
+          <div class="sel-stat">
+            Выбрано: <strong>{selectedServers.size}</strong> серв.
+            {#if selectedServers.size > 0}
+              — {Array.from(selectedServers).sort((a,b)=>a-b).slice(0,10).join(", ")}{selectedServers.size > 10 ? "..." : ""}
+            {/if}
+          </div>
         </div>
+
       </div>
 
-      <div class="panel log-panel">
-        <h2>Log</h2>
-        <div class="log">{logText}</div>
+      <!-- Run button -->
+      <button class="run-btn" on:click={runUpdate} disabled={running}>
+        {#if running}
+          <span class="spinner"></span> Обновление...
+        {:else}
+          ▶ Запустить
+        {/if}
+      </button>
+
+      <!-- Log -->
+      <div class="log-panel">
+        <div class="log-header">
+          <span>Лог</span>
+          <button class="log-clear" on:click={clearLog}>Очистить</button>
+        </div>
+        <div id="log-box" class="log-box">
+          {#each logLines as line}
+            <div class="log-line {line.kind}">{line.text}</div>
+          {/each}
+          {#if logLines.length === 0}
+            <div class="log-line muted">Лог пуст. Запусти обновление.</div>
+          {/if}
+        </div>
       </div>
     {/if}
 
+    <!-- ════════════ CONFIG TAB ════════════ -->
+    {#if activeTab === "config"}
+      <div class="page-title">Настройки</div>
+
+      <!-- Output dir -->
+      <div class="card">
+        <div class="card-label">Папка вывода</div>
+        <div class="row-input">
+          <input class="inp" value={cfg.output_dir} on:input={e => cfg.output_dir = (e.target as HTMLInputElement).value} placeholder="~/.smart-config-editor" />
+          <button class="btn-icon" on:click={pickOutputDir}>📂</button>
+          <button class="btn-icon" on:click={() => openShell(cfg.output_dir || configPath.replace(/[^/]+$/, ""))}>↗</button>
+        </div>
+      </div>
+
+      <!-- Arizona -->
+      <div class="card">
+        <div class="card-label">Arizona — аккаунт форума</div>
+        <div class="creds-grid">
+          <div>
+            <div class="field-label">Логин</div>
+            <input class="inp" bind:value={cfg.arizona.login} placeholder="username" autocomplete="off" />
+          </div>
+          <div>
+            <div class="field-label">Пароль</div>
+            <div class="row-input">
+              <input class="inp" type={showPw.arizona ? "text" : "password"} bind:value={cfg.arizona.password} autocomplete="new-password" />
+              <button class="btn-icon" on:click={() => showPw.arizona = !showPw.arizona}>{showPw.arizona ? "🙈" : "👁"}</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Rodina -->
+      <div class="card">
+        <div class="card-label">Rodina — аккаунт форума</div>
+        <div class="creds-grid">
+          <div>
+            <div class="field-label">Логин</div>
+            <input class="inp" bind:value={cfg.rodina.login} placeholder="username" autocomplete="off" />
+          </div>
+          <div>
+            <div class="field-label">Пароль</div>
+            <div class="row-input">
+              <input class="inp" type={showPw.rodina ? "text" : "password"} bind:value={cfg.rodina.password} autocomplete="new-password" />
+              <button class="btn-icon" on:click={() => showPw.rodina = !showPw.rodina}>{showPw.rodina ? "🙈" : "👁"}</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="save-row">
+        <button class="btn-primary" on:click={save}>💾 Сохранить</button>
+        <button class="btn-secondary" on:click={loadAll}>↺ Перезагрузить</button>
+        <button class="btn-ghost" on:click={() => openShell(configPath)}>📝 Открыть config.json</button>
+      </div>
+    {/if}
+
+    <!-- ════════════ SERVERS TAB ════════════ -->
     {#if activeTab === "servers"}
-      <div class="panel">
-        <h2>Server URLs (Arizona PC 1–8)</h2>
-        {#each ARIZONA_PC.slice(0, 8) as id}
-          <div class="server-card">
-            <div class="card-header">Server {id}</div>
-            <div class="grid-2">
-              <div>
-                <label for={`uk-${id}-1`}>UK URL #1</label>
-                <input id={`uk-${id}-1`} bind:value={cfg.servers[id.toString()].forum_uk_url} placeholder="https://..." />
-              </div>
-              <div>
-                <label for={`uk-${id}-2`}>UK URL #2</label>
-                <input id={`uk-${id}-2`} bind:value={cfg.servers[id.toString()].forum_uk_url_2} placeholder="https://..." />
-              </div>
-              <div>
-                <label for={`pdd-${id}-1`}>PDD URL #1</label>
-                <input id={`pdd-${id}-1`} bind:value={cfg.servers[id.toString()].forum_pdd_url} placeholder="https://..." />
-              </div>
-              <div>
-                <label for={`pdd-${id}-2`}>PDD URL #2</label>
-                <input id={`pdd-${id}-2`} bind:value={cfg.servers[id.toString()].forum_pdd_url_2} placeholder="https://..." />
-              </div>
+      <div class="page-title">Ссылки на форум по серверам</div>
+
+      <div class="search-row">
+        <input class="inp search-inp" bind:value={serverSearch} placeholder="Поиск по номеру сервера..." />
+        {#if serverSearch}
+          <button class="btn-icon" on:click={() => serverSearch = ""}>✕</button>
+        {/if}
+      </div>
+
+      {#each filteredGroups as g}
+        <div class="server-group">
+          <div class="group-header">{g.label}</div>
+          {#each g.servers as id}
+            {@const srv = cfg.servers[String(id)] ?? { forum_uk_url:"",forum_uk_url_2:"",forum_pdd_url:"",forum_pdd_url_2:"" }}
+            <div class="server-row">
+              <button
+                class="srv-id"
+                class:has-links={srv.forum_uk_url || srv.forum_pdd_url}
+                on:click={() => expandedServer = expandedServer === String(id) ? null : String(id)}
+              >
+                <span class="srv-num">{id}</span>
+                <span class="srv-status">
+                  {#if srv.forum_uk_url && srv.forum_pdd_url}✅{:else if srv.forum_uk_url || srv.forum_pdd_url}⚡{:else}—{/if}
+                </span>
+                <span class="srv-arrow">{expandedServer === String(id) ? "▲" : "▼"}</span>
+              </button>
+
+              {#if expandedServer === String(id)}
+                <div class="srv-fields">
+                  {#each [
+                    ["forum_uk_url",  "УК — основная ссылка"],
+                    ["forum_uk_url_2","УК — доп. ссылка (опц.)"],
+                    ["forum_pdd_url", "ПДД/АК — основная ссылка"],
+                    ["forum_pdd_url_2","ПДД/АК — доп. ссылка (опц.)"],
+                  ] as [field, label]}
+                    <div class="srv-field-row">
+                      <div class="field-label">{label}</div>
+                      <div class="row-input">
+                        <input
+                          class="inp"
+                          value={getServerLink(id, field as any)}
+                          on:input={e => setServerLink(id, field as any, (e.target as HTMLInputElement).value)}
+                          placeholder="https://forum.arizona-rp.com/threads/..."
+                        />
+                        {#if getServerLink(id, field as any)}
+                          <button class="btn-icon" on:click={() => openShell(getServerLink(id, field as any))}>↗</button>
+                        {/if}
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {/each}
+
+      <div class="save-row">
+        <button class="btn-primary" on:click={save}>💾 Сохранить</button>
+      </div>
+    {/if}
+
+    <!-- ════════════ AI TAB ════════════ -->
+    {#if activeTab === "ai"}
+      <div class="page-title">AI-настройки</div>
+
+      <!-- Provider -->
+      <div class="card">
+        <div class="card-label">Провайдер</div>
+        <div class="mode-row">
+          <button class="mode-btn" class:selected={cfg.ai.provider === "gemini"} on:click={() => cfg.ai.provider = "gemini"}>Gemini</button>
+          <button class="mode-btn" class:selected={cfg.ai.provider === "openai"} on:click={() => cfg.ai.provider = "openai"}>OpenAI</button>
+        </div>
+      </div>
+
+      <!-- Gemini keys -->
+      <div class="card" class:dim={cfg.ai.provider !== "gemini"}>
+        <div class="card-label">Gemini API ключи</div>
+        <div class="field-label">Модель</div>
+        <input class="inp" bind:value={cfg.ai.gemini_model} placeholder="gemini-2.0-flash" style="margin-bottom:12px" />
+
+        {#each cfg.ai.gemini_api_keys as _, i}
+          <div class="key-row">
+            <div class="field-label">Ключ #{i + 1}</div>
+            <div class="row-input">
+              <input class="inp" type="password" bind:value={cfg.ai.gemini_api_keys[i]} placeholder="AIza..." autocomplete="new-password" />
+              <button class="btn-icon red" on:click={() => removeKey("gemini", i)} disabled={cfg.ai.gemini_api_keys.length <= 1}>✕</button>
             </div>
           </div>
         {/each}
+        <button class="btn-ghost small" on:click={() => addKey("gemini")}>+ Добавить ключ</button>
+      </div>
+
+      <!-- OpenAI keys -->
+      <div class="card" class:dim={cfg.ai.provider !== "openai"}>
+        <div class="card-label">OpenAI API ключи</div>
+        <div class="field-label">Модель</div>
+        <input class="inp" bind:value={cfg.ai.openai_model} placeholder="gpt-4.1-mini" style="margin-bottom:12px" />
+
+        {#each cfg.ai.openai_api_keys as _, i}
+          <div class="key-row">
+            <div class="field-label">Ключ #{i + 1}</div>
+            <div class="row-input">
+              <input class="inp" type="password" bind:value={cfg.ai.openai_api_keys[i]} placeholder="sk-..." autocomplete="new-password" />
+              <button class="btn-icon red" on:click={() => removeKey("openai", i)} disabled={cfg.ai.openai_api_keys.length <= 1}>✕</button>
+            </div>
+          </div>
+        {/each}
+        <button class="btn-ghost small" on:click={() => addKey("openai")}>+ Добавить ключ</button>
+      </div>
+
+      <div class="save-row">
+        <button class="btn-primary" on:click={save}>💾 Сохранить</button>
       </div>
     {/if}
-  </div>
+
+  </main>
 </div>
 
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
 <style>
-  @import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap");
-
-  :global(:root) {
-    --bg-1: #0b1116;
-    --bg-2: #17212b;
-    --panel: #121a22;
-    --panel-2: #0f151c;
-    --border: #283644;
-    --accent: #26c6da;
-    --accent-2: #f4a261;
-    --text: #eef3fb;
-    --muted: #b6c0d1;
-    --chip: #1a2530;
-  }
-
+  :global(*) { box-sizing: border-box; margin: 0; padding: 0; }
   :global(body) {
-    margin: 0;
-    padding: 0;
-    font-family: "Space Grotesk", "Segoe UI", sans-serif;
-    background: radial-gradient(1200px 600px at 20% -10%, #1b2a38 0%, var(--bg-1) 50%)
-      , linear-gradient(135deg, var(--bg-1) 0%, var(--bg-2) 100%);
-    color: var(--text);
-  }
-
-  .shell {
-    display: flex;
-    flex-direction: column;
+    font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+    background: #0d1117;
+    color: #e6edf3;
     height: 100vh;
-    background: var(--panel-2);
     overflow: hidden;
   }
 
-  .hero {
-    padding: 20px 24px;
-    background: linear-gradient(135deg, rgba(38, 198, 218, 0.18) 0%, rgba(244, 162, 97, 0.12) 100%);
-    border-bottom: 1px solid var(--border);
+  /* ── Layout ─────────────────────────────────────────────────────────── */
+  .app {
     display: flex;
-    justify-content: space-between;
+    height: 100vh;
+  }
+
+  /* ── Sidebar ─────────────────────────────────────────────────────────── */
+  .sidebar {
+    width: 180px;
+    flex-shrink: 0;
+    background: #161b22;
+    border-right: 1px solid #30363d;
+    display: flex;
+    flex-direction: column;
+    padding: 16px 0;
+    gap: 4px;
+  }
+
+  .logo {
+    display: flex;
     align-items: center;
-  }
-
-  .hero h1 {
-    margin: 0;
-    font-size: 24px;
-    font-weight: 600;
-    color: var(--text);
-  }
-
-  .hero p {
-    margin: 4px 0 0 0;
-    font-size: 13px;
-    color: var(--muted);
-  }
-
-  .hero-meta {
-    display: flex;
-    gap: 12px;
-  }
-
-  .chip {
-    background: var(--chip);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 6px 12px;
-    font-size: 12px;
-    color: var(--muted);
-  }
-
-  .chip strong {
-    color: var(--accent);
-    font-weight: 600;
-  }
-
-  nav.tabs {
-    display: flex;
     gap: 8px;
-    padding: 12px 24px;
-    background: rgba(0, 0, 0, 0.25);
-    border-bottom: 1px solid var(--border);
-    overflow-x: auto;
+    padding: 0 16px 16px;
+    border-bottom: 1px solid #30363d;
+    margin-bottom: 8px;
   }
+  .logo-icon { font-size: 20px; }
+  .logo-text { font-size: 13px; font-weight: 700; color: #58a6ff; letter-spacing: 0.3px; }
 
-  nav.tabs button {
-    padding: 8px 16px;
+  nav { flex: 1; display: flex; flex-direction: column; gap: 2px; padding: 0 8px; }
+
+  .nav-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 10px;
     border: none;
-    background: transparent;
-    color: var(--muted);
     border-radius: 6px;
+    background: transparent;
+    color: #8b949e;
     cursor: pointer;
-    transition: all 0.2s;
-    white-space: nowrap;
-    font-size: 14px;
-  }
-
-  nav.tabs button:hover {
-    background: rgba(38, 198, 218, 0.12);
-    color: var(--text);
-  }
-
-  nav.tabs button.active {
-    background: var(--accent);
-    color: #041014;
-  }
-
-  .page {
-    flex: 1;
-    overflow-y: auto;
-    padding: 20px 24px;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-  }
-
-  .panel {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 16px;
-  }
-
-  .panel h2 {
-    margin: 0 0 12px 0;
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--text);
-  }
-
-  .grid-2 {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 12px;
-  }
-
-  .grid-2 > div {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  label {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
+    transition: all 0.15s;
+    text-align: left;
+  }
+  .nav-btn:hover { background: #21262d; color: #e6edf3; }
+  .nav-btn.active { background: #1f6feb; color: #fff; }
+  .nav-icon { font-size: 15px; width: 20px; text-align: center; }
+
+  .sidebar-footer {
+    padding: 12px 12px 0;
+    border-top: 1px solid #30363d;
+  }
+  .cfg-path {
+    font-size: 10px;
+    color: #484f58;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  input[type="text"],
-  input[type="password"],
-  select {
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 8px 12px;
-    border-radius: 6px;
-    font-size: 13px;
-    transition: all 0.2s;
-  }
-
-  input:focus,
-  select:focus {
-    outline: none;
-    border-color: var(--accent);
-    background: rgba(255, 255, 255, 0.12);
-    box-shadow: 0 0 0 3px rgba(38, 198, 218, 0.15);
-  }
-
-  input:readonly {
-    background: rgba(255, 255, 255, 0.04);
-    cursor: not-allowed;
-  }
-
-  .input-group {
-    display: flex;
-    gap: 6px;
-  }
-
-  .input-group input {
+  /* ── Main ─────────────────────────────────────────────────────────────── */
+  main {
     flex: 1;
-  }
-
-  .btn-icon {
-    padding: 8px 12px;
-    background: rgba(38, 198, 218, 0.25);
-    border: 1px solid rgba(38, 198, 218, 0.35);
-    color: var(--accent);
-    border-radius: 6px;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-
-  .btn-icon:hover {
-    background: rgba(38, 198, 218, 0.35);
-  }
-
-  .panel-actions {
-    display: flex;
-    gap: 8px;
-    justify-content: center;
-  }
-
-  .btn-primary,
-  .btn-secondary,
-  .btn-ghost {
-    padding: 10px 20px;
-    border: none;
-    border-radius: 8px;
-    cursor: pointer;
-    font-weight: 600;
-    font-size: 14px;
-    transition: all 0.2s;
-  }
-
-  .btn-primary {
-    background: linear-gradient(135deg, #26c6da 0%, #2bd4a0 100%);
-    color: #041014;
-  }
-
-  .btn-primary:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 16px rgba(38, 198, 218, 0.25);
-  }
-
-  .btn-secondary {
-    background: rgba(255, 255, 255, 0.12);
-    color: var(--muted);
-  }
-
-  .btn-secondary:hover {
-    background: rgba(255, 255, 255, 0.2);
-    color: var(--text);
-  }
-
-  .btn-ghost {
-    background: transparent;
-    color: var(--muted);
-    border: 1px solid var(--border);
-  }
-
-  .btn-ghost:hover {
-    color: var(--text);
-    border-color: rgba(38, 198, 218, 0.4);
-  }
-
-  .server-selector {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 12px;
-  }
-
-  .server-btn {
-    flex: 1;
-    padding: 10px 16px;
-    background: rgba(38, 198, 218, 0.18);
-    border: 1px solid rgba(38, 198, 218, 0.35);
-    color: var(--accent);
-    border-radius: 8px;
-    cursor: pointer;
-    font-weight: 600;
-    transition: all 0.2s;
-  }
-
-  .server-btn:hover {
-    background: rgba(38, 198, 218, 0.28);
-  }
-
-  .btn-clear {
-    padding: 10px 16px;
-    background: rgba(255, 100, 100, 0.2);
-    border: 1px solid rgba(255, 100, 100, 0.3);
-    color: #ff6464;
-    border-radius: 8px;
-    cursor: pointer;
-    font-weight: 600;
-    transition: all 0.2s;
-  }
-
-  .btn-clear:hover {
-    background: rgba(255, 100, 100, 0.3);
-  }
-
-  .server-popup {
-    background: rgba(8, 12, 16, 0.7);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 12px;
-    margin-top: 8px;
-  }
-
-  .popup-row {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 8px;
-    margin-bottom: 12px;
-  }
-
-  .quick-btn {
-    padding: 8px 12px;
-    background: rgba(38, 198, 218, 0.18);
-    border: 1px solid rgba(38, 198, 218, 0.35);
-    color: var(--accent);
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 12px;
-    font-weight: 600;
-    transition: all 0.2s;
-  }
-
-  .quick-btn:hover {
-    background: rgba(38, 198, 218, 0.28);
-  }
-
-  .popup-divider {
-    height: 1px;
-    background: var(--border);
-    margin: 8px 0;
-  }
-
-  .popup-content {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 16px;
-    max-height: 400px;
     overflow-y: auto;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
   }
 
-  .server-column h4 {
-    margin: 0 0 8px 0;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--accent);
+  .page-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: #e6edf3;
+    padding-bottom: 4px;
+    border-bottom: 1px solid #30363d;
+    margin-bottom: 2px;
+  }
+
+  /* ── Card ─────────────────────────────────────────────────────────────── */
+  .card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .card.dim { opacity: 0.5; pointer-events: none; }
+  .card-wide { /* same */ }
+  .card-label {
+    font-size: 11px;
+    font-weight: 700;
+    color: #58a6ff;
     text-transform: uppercase;
+    letter-spacing: 0.6px;
+  }
+  .field-label {
+    font-size: 11px;
+    color: #8b949e;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin-bottom: 4px;
   }
 
-  .checkbox {
+  /* ── Run tab layout ──────────────────────────────────────────────────── */
+  .run-top {
+    display: grid;
+    grid-template-columns: auto auto 1fr;
+    gap: 14px;
+  }
+
+  /* ── Mode buttons ─────────────────────────────────────────────────────── */
+  .mode-row { display: flex; gap: 6px; }
+  .mode-btn {
+    padding: 7px 18px;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    background: #21262d;
+    color: #8b949e;
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .mode-btn:hover { border-color: #58a6ff; color: #e6edf3; }
+  .mode-btn.selected { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+
+  /* ── Toggle ───────────────────────────────────────────────────────────── */
+  .toggle-row {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 4px;
-    cursor: pointer;
     font-size: 13px;
+    color: #c9d1d9;
+    cursor: pointer;
     user-select: none;
   }
+  .toggle-row input { accent-color: #58a6ff; width: 15px; height: 15px; cursor: pointer; }
 
-  .checkbox input[type="checkbox"] {
-    width: 16px;
-    height: 16px;
+  /* ── Server selection ─────────────────────────────────────────────────── */
+  .sel-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .sel-btn {
+    padding: 5px 12px;
+    border: 1px solid #30363d;
+    border-radius: 5px;
+    background: #21262d;
+    color: #8b949e;
+    font-size: 12px;
+    font-weight: 600;
     cursor: pointer;
-    accent-color: var(--accent);
+    transition: all 0.15s;
   }
+  .sel-btn:hover { border-color: #58a6ff; color: #e6edf3; }
+  .sel-btn.red { border-color: #f85149; color: #f85149; }
+  .sel-btn.red:hover { background: rgba(248,81,73,0.15); }
 
-  .checkbox-label {
+  .server-chips { display: flex; flex-wrap: wrap; gap: 5px; max-height: 120px; overflow-y: auto; }
+  .chip {
+    padding: 3px 9px;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    background: #21262d;
+    color: #8b949e;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.12s;
+    font-weight: 500;
+  }
+  .chip:hover { border-color: #58a6ff; }
+  .chip.on { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+
+  .sel-stat { font-size: 12px; color: #8b949e; }
+  .sel-stat strong { color: #58a6ff; }
+
+  /* ── Run button ────────────────────────────────────────────────────────── */
+  .run-btn {
+    align-self: flex-start;
+    padding: 11px 32px;
+    border: none;
+    border-radius: 8px;
+    background: #238636;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s;
     display: flex;
     align-items: center;
     gap: 8px;
-    cursor: pointer;
-    font-weight: 400;
-    text-transform: none;
+  }
+  .run-btn:hover:not(:disabled) { background: #2ea043; transform: translateY(-1px); }
+  .run-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner {
+    width: 14px; height: 14px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
   }
 
-  .checkbox-label input {
-    width: 16px;
-    height: 16px;
-    cursor: pointer;
-    accent-color: var(--accent);
-  }
-
-  .progress-box {
-    display: grid;
-    grid-template-columns: 100px 1fr 60px;
-    gap: 12px;
-    align-items: center;
-  }
-
-  .progress-label {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--muted);
-    text-transform: uppercase;
-  }
-
-  .progress-bar {
-    background: rgba(0, 0, 0, 0.35);
-    border-radius: 4px;
-    height: 8px;
-    overflow: hidden;
-  }
-
-  .progress-fill {
-    background: linear-gradient(90deg, #26c6da 0%, #2bd4a0 100%);
-    height: 100%;
-    transition: width 0.3s;
-  }
-
-  .progress-percent {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--accent);
-    text-align: right;
-  }
-
+  /* ── Log ─────────────────────────────────────────────────────────────── */
   .log-panel {
     flex: 1;
     display: flex;
     flex-direction: column;
+    min-height: 200px;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    overflow: hidden;
   }
-
-  .log {
-    flex: 1;
-    background: rgba(7, 10, 13, 0.9);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 10px;
-    font-family: "IBM Plex Mono", "Courier New", monospace;
+  .log-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    background: #1c2128;
+    border-bottom: 1px solid #30363d;
+    font-size: 12px;
+    font-weight: 700;
+    color: #8b949e;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .log-clear {
+    padding: 2px 10px;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    background: transparent;
+    color: #8b949e;
     font-size: 11px;
-    color: #d8e2f1;
-    line-height: 1.5;
+    cursor: pointer;
+  }
+  .log-clear:hover { color: #e6edf3; border-color: #8b949e; }
+  .log-box {
+    flex: 1;
     overflow-y: auto;
-    white-space: pre-wrap;
-    word-wrap: break-word;
+    padding: 10px 12px;
+    font-family: "Cascadia Code", "Fira Mono", "IBM Plex Mono", monospace;
+    font-size: 12px;
+    line-height: 1.6;
   }
+  .log-line { color: #c9d1d9; }
+  .log-line.ok   { color: #3fb950; }
+  .log-line.err  { color: #f85149; }
+  .log-line.warn { color: #d29922; }
+  .log-line.muted { color: #484f58; font-style: italic; }
 
-  .server-card {
-    background: rgba(8, 12, 16, 0.55);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 12px;
-    margin-bottom: 12px;
+  /* ── Inputs ─────────────────────────────────────────────────────────── */
+  .inp {
+    width: 100%;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #e6edf3;
+    padding: 7px 10px;
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.15s;
   }
+  .inp:focus { border-color: #58a6ff; }
+  .inp::placeholder { color: #484f58; }
 
-  .card-header {
+  .row-input { display: flex; gap: 6px; align-items: center; }
+  .row-input .inp { flex: 1; }
+
+  .creds-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+  .btn-icon {
+    padding: 7px 10px;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    background: #21262d;
+    color: #8b949e;
+    cursor: pointer;
+    font-size: 14px;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .btn-icon:hover { border-color: #58a6ff; color: #e6edf3; }
+  .btn-icon.red { border-color: #f85149; color: #f85149; }
+  .btn-icon.red:hover { background: rgba(248,81,73,0.15); }
+  .btn-icon:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  .btn-primary {
+    padding: 9px 20px;
+    border: none;
+    border-radius: 7px;
+    background: #238636;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn-primary:hover { background: #2ea043; }
+
+  .btn-secondary {
+    padding: 9px 20px;
+    border: 1px solid #30363d;
+    border-radius: 7px;
+    background: transparent;
+    color: #8b949e;
     font-size: 13px;
     font-weight: 600;
-    color: var(--accent);
-    margin-bottom: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn-secondary:hover { color: #e6edf3; border-color: #8b949e; }
+
+  .btn-ghost {
+    padding: 9px 20px;
+    border: 1px solid #30363d;
+    border-radius: 7px;
+    background: transparent;
+    color: #8b949e;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn-ghost:hover { border-color: #58a6ff; color: #58a6ff; }
+  .btn-ghost.small { padding: 5px 14px; font-size: 12px; }
+
+  .save-row { display: flex; gap: 10px; margin-top: 4px; }
+
+  /* ── Servers tab ─────────────────────────────────────────────────────── */
+  .search-row { display: flex; gap: 8px; align-items: center; }
+  .search-inp { max-width: 280px; }
+
+  .server-group { margin-bottom: 16px; }
+  .group-header {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: #8b949e;
+    margin-bottom: 6px;
+    padding: 4px 0;
+    border-bottom: 1px solid #21262d;
   }
 
-  @media (max-width: 1024px) {
-    .popup-content {
-      grid-template-columns: repeat(2, 1fr);
-    }
+  .server-row { margin-bottom: 4px; }
+  .srv-id {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    background: #161b22;
+    color: #c9d1d9;
+    cursor: pointer;
+    text-align: left;
+    font-size: 13px;
+    font-weight: 500;
+    transition: all 0.15s;
   }
+  .srv-id:hover { border-color: #58a6ff; }
+  .srv-id.has-links { border-color: #238636; }
+  .srv-num { font-weight: 700; min-width: 36px; }
+  .srv-status { margin-left: 4px; }
+  .srv-arrow { margin-left: auto; color: #8b949e; font-size: 11px; }
 
-  @media (max-width: 768px) {
-    .popup-content {
-      grid-template-columns: 1fr;
-    }
-
-    .grid-2 {
-      grid-template-columns: 1fr;
-    }
+  .srv-fields {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-top: none;
+    border-radius: 0 0 6px 6px;
+    padding: 12px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
   }
+  .srv-field-row { display: flex; flex-direction: column; gap: 4px; }
+
+  /* ── AI tab ──────────────────────────────────────────────────────────── */
+  .key-row { margin-bottom: 6px; }
 </style>
