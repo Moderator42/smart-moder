@@ -8,8 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "build:deb": "tauri build -- --bundles deb",
-    "build:windows": "tauri build -- --bundles nsis,msi"
+    "build:deb": "tauri build --bundles deb",
+    "build:windows": "tauri build --bundles nsis,msi"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

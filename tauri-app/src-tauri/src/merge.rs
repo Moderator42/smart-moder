@@ -244,6 +244,7 @@ mod tests {
                 lvl: None,
                 amount: Some("50.000".to_string()),
             }],
+            updated_at: None,
         }];
 
         let result = postprocess("pdd", data, None);
