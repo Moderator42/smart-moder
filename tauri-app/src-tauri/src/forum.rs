@@ -35,12 +35,10 @@ pub async fn fetch_with_fallback(
     password: &str,
     skip_login: bool,
 ) -> Result<String> {
-    let urls: Vec<&str> = match mode {
-        "uk"  => vec![links.forum_uk_url.as_str(),  links.forum_uk_url_2.as_str()],
-        "pdd" => vec![links.forum_pdd_url.as_str(), links.forum_pdd_url_2.as_str()],
-        _     => return Err(anyhow!("Unknown mode: {}", mode)),
-    };
-    let urls: Vec<&str> = urls.into_iter().filter(|s| !s.trim().is_empty()).collect();
+    if !matches!(mode, "uk" | "pdd" | "UK" | "PDD") {
+        return Err(anyhow!("Unknown mode: {}", mode));
+    }
+    let urls = links.urls_for(mode);
     if urls.is_empty() {
         return Err(anyhow!("No forum URLs configured for mode {}", mode));
     }
@@ -51,12 +49,12 @@ pub async fn fetch_with_fallback(
         eprintln!("  [forum] Fetching: {url}");
 
         // ── Primary: WebView ────────────────────────────────────────────────
-        let webview_result = fetch_via_webview(app, url, login, password, skip_login).await;
+        let webview_result = fetch_via_webview(app, &url, login, password, skip_login).await;
 
         match webview_result {
             Ok(ref text) if looks_like_valid_text(text) => {
                 eprintln!("  [forum] WebView OK: {} chars", text.len());
-                parts.push(webview_result.unwrap());
+                parts.push(text.clone());
                 continue;
             }
             Ok(ref text) => {
@@ -68,29 +66,26 @@ pub async fn fetch_with_fallback(
         }
 
         // ── Fallback: reqwest ───────────────────────────────────────────────
-        let client = match build_client() {
-            Ok(c) => c,
-            Err(e) => { eprintln!("  [forum] reqwest client error: {e}"); continue; }
-        };
-        match fetch_authenticated(&client, url, login, password, skip_login).await {
+        let client = build_client().map_err(|e| anyhow!("reqwest client error for {url}: {e}"))?;
+        match fetch_authenticated(&client, &url, login, password, skip_login).await {
             Ok(text) if looks_like_valid_text(&text) => {
                 eprintln!("  [forum] reqwest OK: {} chars", text.len());
                 parts.push(text);
             }
-            Ok(text) if !text.is_empty() => {
-                eprintln!("  [forum] reqwest short ({} chars), using anyway", text.len());
-                parts.push(text);
+            Ok(text) => {
+                return Err(anyhow!(
+                    "Forum URL did not match expected content: {} ({} chars)",
+                    url,
+                    text.len()
+                ));
             }
-            Ok(_) => { eprintln!("  [forum] reqwest returned empty"); }
-            Err(e) => { eprintln!("  [forum] reqwest failed: {e}"); }
+            Err(e) => {
+                return Err(anyhow!("Forum fetch failed for {}: {}", url, e));
+            }
         }
     }
 
-    if parts.is_empty() {
-        Err(anyhow!("All fetch attempts failed for mode {}", mode))
-    } else {
-        Ok(parts.join("\n\n"))
-    }
+    Ok(parts.join("\n\n"))
 }
 
 // ── WebView fetch ───────────────────────────────────────────────────────────
@@ -155,7 +150,7 @@ async fn fetch_via_webview(
 
     let window = WebviewWindowBuilder::new(
         app,
-        &label,
+        label.clone(),
         WebviewUrl::External(start_url.parse().map_err(|e| anyhow!("bad url: {e}"))?),
     )
     .title("Forum Fetch")

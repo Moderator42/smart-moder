@@ -6,8 +6,10 @@ mod forum;
 mod ai;
 mod merge;
 mod update;
+mod history;
 
 use types::{Config, ServerInfo};
+use history::{DiffReport, RunHistoryEntry};
 
 #[cfg(target_os = "linux")]
 fn set_linux_runtime_env() {
@@ -78,6 +80,26 @@ async fn run_update(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn get_history() -> Result<Vec<RunHistoryEntry>, String> {
+    history::load().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_last_diff() -> Result<Option<DiffReport>, String> {
+    history::load_last_diff().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn apply_pending(server_num: u32, mode: String) -> Result<(), String> {
+    update::apply_pending(server_num, &mode).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn cancel_pending(server_num: u32, mode: String) -> Result<(), String> {
+    update::cancel_pending(server_num, &mode).map_err(|e| e.to_string())
+}
+
 fn main() {
     set_linux_runtime_env();
 
@@ -89,7 +111,11 @@ fn main() {
             save_config,
             get_config_path,
             get_servers,
-            run_update
+            run_update,
+            get_history,
+            get_last_diff,
+            apply_pending,
+            cancel_pending
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

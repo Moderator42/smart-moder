@@ -3,7 +3,7 @@ name = "smartconfig-tauri"
 version = "0.1.0"
 description = "Smart Config Editor - Tauri Application"
 authors = ["Anonymous"]
-rust-version = "1.70"
+rust-version = "1.77"
 edition = "2021"
 publish = false
 

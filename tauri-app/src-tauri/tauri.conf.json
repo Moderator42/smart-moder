@@ -10,16 +10,15 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "deb",
+      "nsis",
+      "msi"
+    ],
     "icon": [
       "icons/icon.png",
       "icons/icon.ico"
     ],
-    "linux": {
-      "appimage": {
-        "bundleMediaFramework": false
-      }
-    },
     "windows": {
       "nsis": {
         "installMode": "perMachine"
@@ -32,12 +31,12 @@
         "title": "Smart Config Editor",
         "width": 1280,
         "height": 720,
-        "minWidth": 400,
-        "minHeight": 300
+        "minWidth": 980,
+        "minHeight": 680
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' asset: https://asset.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost https://api.smart.moder42.tech http://127.0.0.1:* http://localhost:* https://raw.githubusercontent.com https://generativelanguage.googleapis.com"
     }
   }
 }

@@ -6,6 +6,8 @@
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
   type ServerLinks = {
+    forum_uk_urls: string[];
+    forum_pdd_urls: string[];
     forum_uk_url: string;
     forum_uk_url_2: string;
     forum_pdd_url: string;
@@ -18,7 +20,9 @@
     servers: Record<string, ServerLinks>;
     output_dir: string;
     ai: {
-      provider: string;
+      provider: "gemini" | "openai" | string;
+      backend_url: string;
+      backend_token: string;
       openai_api_keys: string[];
       openai_api_key: string;
       openai_model: string;
@@ -28,13 +32,74 @@
     };
   };
 
+  type HistoryEntry = {
+    id: string | number;
+    created_at: number;
+    user: string;
+    server: string;
+    server_id?: number;
+    mode: string;
+    ai_provider: string;
+    status: string;
+    limit_charged: boolean;
+    file_saved: boolean;
+    message: string;
+  };
+
+  type DiffReport = {
+    created_at: number;
+    server: string;
+    mode: string;
+    added: string[];
+    changed: string[];
+    removed: string[];
+  };
+
+  type BackendUser = {
+    id: number;
+    telegram_id: number;
+    username?: string | null;
+    role: "admin" | "editor" | "user";
+    daily_limit: number;
+    used_today?: number;
+    left_today?: number;
+  };
+
+  type BackendLink = {
+    id: number;
+    server_id: number;
+    type: "UK" | "PDD";
+    title: string;
+    url: string;
+    priority: number;
+    is_active: boolean;
+  };
+
+  type BackendServer = {
+    id: number;
+    name: string;
+    is_active: boolean;
+    links: BackendLink[];
+  };
+
+  const emptyLinks = (): ServerLinks => ({
+    forum_uk_urls: [],
+    forum_pdd_urls: [],
+    forum_uk_url: "",
+    forum_uk_url_2: "",
+    forum_pdd_url: "",
+    forum_pdd_url_2: "",
+  });
+
   const emptyConfig = (): Config => ({
     arizona: { login: "", password: "" },
-    rodina:  { login: "", password: "" },
+    rodina: { login: "", password: "" },
     servers: {},
     output_dir: "",
     ai: {
       provider: "gemini",
+      backend_url: "https://api.smart.moder42.tech",
+      backend_token: "",
       openai_api_keys: [""],
       openai_api_key: "",
       openai_model: "gpt-4.1-mini",
@@ -44,7 +109,6 @@
     },
   });
 
-  // ── State ──────────────────────────────────────────────────────────────────
   let cfg: Config = emptyConfig();
   let configPath = "";
   let logLines: { text: string; kind: "info" | "ok" | "err" | "warn" }[] = [];
@@ -52,90 +116,171 @@
   let mode: "uk" | "pdd" | "both" = "both";
   let skipLogin = false;
   let running = false;
-  let activeTab: "run" | "config" | "servers" | "ai" = "run";
+  let activeTab: "dashboard" | "history" | "diff" | "backups" | "servers" | "config" | "ai" | "profile" = "dashboard";
   let serverSearch = "";
-  let expandedServer: string | null = null;
+  let history: HistoryEntry[] = [];
+  let diff: DiffReport | null = null;
+  let backendUser: BackendUser | null = null;
+  let backendServers: BackendServer[] = [];
+  let loginCode = "";
+  let backendError = "";
   let showPw = { arizona: false, rodina: false };
 
-  // ── Server constants ───────────────────────────────────────────────────────
-  const AZ_PC     = Array.from({ length: 32 }, (_, i) => i + 1);
+  const AZ_PC = Array.from({ length: 32 }, (_, i) => i + 1);
   const AZ_MOBILE = [101, 102, 103];
-  const AZ_VC     = [200];
-  const RD_PC     = Array.from({ length: 7 },  (_, i) => i + 301);
+  const AZ_VC = [200];
+  const RD_PC = Array.from({ length: 7 }, (_, i) => i + 301);
   const RD_MOBILE = [401, 402];
 
-  const SERVER_GROUPS = [
-    { label: "Arizona PC",     servers: AZ_PC,     project: "arizona" },
+  const LOCAL_GROUPS = [
+    { label: "Arizona PC", servers: AZ_PC, project: "arizona" },
     { label: "Arizona Mobile", servers: AZ_MOBILE, project: "arizona" },
-    { label: "Arizona VC",     servers: AZ_VC,     project: "arizona" },
-    { label: "Rodina PC",      servers: RD_PC,     project: "rodina"  },
-    { label: "Rodina Mobile",  servers: RD_MOBILE, project: "rodina"  },
+    { label: "Arizona VC", servers: AZ_VC, project: "arizona" },
+    { label: "Rodina PC", servers: RD_PC, project: "rodina" },
+    { label: "Rodina Mobile", servers: RD_MOBILE, project: "rodina" },
   ];
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
+  const tabs = [
+    { id: "dashboard", icon: "🏠", label: "Главная" },
+    { id: "history", icon: "📜", label: "История" },
+    { id: "diff", icon: "🧩", label: "Diff" },
+    { id: "backups", icon: "🗂", label: "Backups" },
+    { id: "servers", icon: "🖥", label: "Серверы" },
+    { id: "config", icon: "⚙", label: "Настройки" },
+    { id: "ai", icon: "🤖", label: "AI" },
+    { id: "profile", icon: "👤", label: "Профиль" },
+  ];
+
   const log = (text: string, kind: "info" | "ok" | "err" | "warn" = "info") => {
     logLines = [...logLines, { text, kind }];
-    // auto-scroll
     setTimeout(() => {
       const el = document.getElementById("log-box");
       if (el) el.scrollTop = el.scrollHeight;
     }, 20);
   };
 
-  const clearLog = () => { logLines = []; };
-
-  const getServerLink = (id: number, field: string): string =>
-    (cfg.servers[String(id)] as any)?.[field] ?? "";
-
-  const setServerLink = (id: number, field: string, val: string) => {
-    if (!cfg.servers[String(id)]) {
-      cfg.servers[String(id)] = { forum_uk_url: "", forum_uk_url_2: "", forum_pdd_url: "", forum_pdd_url_2: "" };
+  const normalizeLinks = (links?: Partial<ServerLinks>): ServerLinks => {
+    const out = { ...emptyLinks(), ...(links ?? {}) } as ServerLinks;
+    if (!Array.isArray(out.forum_uk_urls) || out.forum_uk_urls.length === 0) {
+      out.forum_uk_urls = [out.forum_uk_url, out.forum_uk_url_2].filter(Boolean);
     }
-    (cfg.servers[String(id)] as any)[field] = val;
-    cfg = cfg; // trigger reactivity
+    if (!Array.isArray(out.forum_pdd_urls) || out.forum_pdd_urls.length === 0) {
+      out.forum_pdd_urls = [out.forum_pdd_url, out.forum_pdd_url_2].filter(Boolean);
+    }
+    out.forum_uk_url = out.forum_uk_urls[0] ?? "";
+    out.forum_uk_url_2 = out.forum_uk_urls[1] ?? "";
+    out.forum_pdd_url = out.forum_pdd_urls[0] ?? "";
+    out.forum_pdd_url_2 = out.forum_pdd_urls[1] ?? "";
+    return out;
   };
 
-  // Ensure ai.gemini_api_keys / openai_api_keys are arrays (from old configs)
   const normalizeCfg = (c: Config): Config => {
-    if (!Array.isArray(c.ai.gemini_api_keys) || c.ai.gemini_api_keys.length === 0) {
-      c.ai.gemini_api_keys = c.ai.gemini_api_key ? [c.ai.gemini_api_key] : [""];
-    }
-    if (!Array.isArray(c.ai.openai_api_keys) || c.ai.openai_api_keys.length === 0) {
-      c.ai.openai_api_keys = c.ai.openai_api_key ? [c.ai.openai_api_key] : [""];
-    }
+    if (!c.ai) c.ai = emptyConfig().ai;
+    if (!c.ai.backend_url) c.ai.backend_url = "https://api.smart.moder42.tech";
+    if (!Array.isArray(c.ai.gemini_api_keys) || c.ai.gemini_api_keys.length === 0) c.ai.gemini_api_keys = c.ai.gemini_api_key ? [c.ai.gemini_api_key] : [""];
+    if (!Array.isArray(c.ai.openai_api_keys) || c.ai.openai_api_keys.length === 0) c.ai.openai_api_keys = c.ai.openai_api_key ? [c.ai.openai_api_key] : [""];
+    for (const key of Object.keys(c.servers ?? {})) c.servers[key] = normalizeLinks(c.servers[key]);
     return c;
   };
 
-  const addKey = (provider: "gemini" | "openai") => {
-    const arr = provider === "gemini" ? cfg.ai.gemini_api_keys : cfg.ai.openai_api_keys;
-    arr.push("");
-    cfg = cfg;
-  };
-  const removeKey = (provider: "gemini" | "openai", idx: number) => {
-    const arr = provider === "gemini" ? cfg.ai.gemini_api_keys : cfg.ai.openai_api_keys;
-    if (arr.length > 1) { arr.splice(idx, 1); cfg = cfg; }
+  const api = async (path: string, options: RequestInit = {}) => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (cfg.ai.backend_token) headers.Authorization = `Bearer ${cfg.ai.backend_token}`;
+    const res = await fetch(`${cfg.ai.backend_url.replace(/\/$/, "")}${path}`, {
+      ...options,
+      headers: { ...headers, ...(options.headers as Record<string, string> | undefined) },
+    });
+    const text = await res.text();
+    let data: any = null;
+    try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+    if (!res.ok) throw new Error(data?.detail ?? text ?? `HTTP ${res.status}`);
+    return data;
   };
 
-  // ── Load / Save ─────────────────────────────────────────────────────────────
+  const syncBackendServersToLocalConfig = () => {
+    if (backendServers.length === 0) return;
+    for (const server of backendServers) {
+      const uk = server.links.filter(l => l.type === "UK" && l.is_active).sort((a, b) => a.priority - b.priority).map(l => l.url);
+      const pdd = server.links.filter(l => l.type === "PDD" && l.is_active).sort((a, b) => a.priority - b.priority).map(l => l.url);
+      cfg.servers[String(server.id)] = normalizeLinks({ forum_uk_urls: uk, forum_pdd_urls: pdd });
+    }
+    cfg = cfg;
+  };
+
+  const save = async () => {
+    cfg.ai.gemini_api_key = cfg.ai.gemini_api_keys[0] ?? "";
+    // OpenAI ключи специально не сохраняем локально: OpenAI работает через backend.
+    cfg.ai.openai_api_key = "";
+    cfg.ai.openai_api_keys = [""];
+    for (const key of Object.keys(cfg.servers)) cfg.servers[key] = normalizeLinks(cfg.servers[key]);
+    await invoke("save_config", { config: cfg });
+    log("✓ Конфиг сохранён", "ok");
+  };
+
+  const loadBackend = async () => {
+    backendError = "";
+    if (!cfg.ai.backend_token) return;
+    try {
+      backendUser = await api("/auth/me");
+      backendServers = await api("/servers");
+      syncBackendServersToLocalConfig();
+      await invoke("save_config", { config: cfg });
+    } catch (e) {
+      backendUser = null;
+      backendServers = [];
+      backendError = String(e);
+    }
+  };
+
+  const refreshHistory = async () => {
+    if (cfg.ai.backend_token) {
+      try {
+        history = await api("/history");
+        return;
+      } catch (e) {
+        log(`История backend недоступна: ${e}`, "warn");
+      }
+    }
+    history = (await invoke("get_history")) as HistoryEntry[];
+  };
+
+  const refreshDiff = async () => {
+    diff = ((await invoke("get_last_diff")) as DiffReport | null) ?? null;
+  };
+
   const loadAll = async () => {
     try {
       cfg = normalizeCfg((await invoke("load_config")) as Config);
       configPath = (await invoke("get_config_path")) as string;
+      await loadBackend();
+      await refreshHistory();
+      await refreshDiff();
     } catch (e) {
-      log(`Ошибка загрузки конфига: ${e}`, "err");
+      log(`Ошибка загрузки: ${e}`, "err");
     }
   };
 
-  const save = async () => {
+  const loginWithTelegramCode = async () => {
     try {
-      // Sync legacy single-key field so Rust doesn't lose it
-      cfg.ai.gemini_api_key  = cfg.ai.gemini_api_keys[0]  ?? "";
-      cfg.ai.openai_api_key  = cfg.ai.openai_api_keys[0]  ?? "";
-      await invoke("save_config", { config: cfg });
-      log("✓ Конфиг сохранён", "ok");
+      const data = await api("/auth/telegram-code", { method: "POST", body: JSON.stringify({ code: loginCode.trim().toUpperCase() }) });
+      cfg.ai.backend_token = data.token;
+      backendUser = data.user;
+      loginCode = "";
+      await save();
+      await loadBackend();
+      await refreshHistory();
+      log("✓ Вход через Telegram выполнен", "ok");
     } catch (e) {
-      log(`Ошибка сохранения: ${e}`, "err");
+      log(`Ошибка входа: ${e}`, "err");
     }
+  };
+
+  const logout = async () => {
+    cfg.ai.backend_token = "";
+    backendUser = null;
+    backendServers = [];
+    await save();
+    await refreshHistory();
   };
 
   const pickOutputDir = async () => {
@@ -146,769 +291,340 @@
     }
   };
 
-  // ── Server selection ────────────────────────────────────────────────────────
+  const localServers = LOCAL_GROUPS.flatMap(g => g.servers.map(id => ({ id, name: String(id), group: g.label })));
+  $: runtimeServers = backendServers.length > 0
+    ? backendServers.map(s => ({ id: s.id, name: s.name, group: "Backend" }))
+    : localServers;
+  $: filteredServers = runtimeServers.filter(s => !serverSearch.trim() || s.name.toLowerCase().includes(serverSearch.toLowerCase()) || String(s.id).includes(serverSearch.trim()));
+  $: selectedPreview = Array.from(selectedServers).sort((a, b) => a - b).slice(0, 12).join(", ");
+  $: dailyLimitText = cfg.ai.provider === "gemini" ? "∞" : `${backendUser?.left_today ?? "?"}/${backendUser?.daily_limit ?? 4}`;
+
   const toggleServer = (id: number) => {
     selectedServers.has(id) ? selectedServers.delete(id) : selectedServers.add(id);
     selectedServers = selectedServers;
   };
-  const selectGroup = (ids: number[]) => { selectedServers = new Set(ids); };
-  const selectAll   = () => { selectedServers = new Set(SERVER_GROUPS.flatMap(g => g.servers)); };
-  const clearSel    = () => { selectedServers = new Set(); };
+  const selectAll = () => { selectedServers = new Set(filteredServers.map(s => s.id)); };
+  const clearSel = () => { selectedServers = new Set(); };
+  const setMode = (val: string) => { mode = val as any; };
+  const setTab = (id: string) => { activeTab = id as any; };
 
-  // ── Run update ──────────────────────────────────────────────────────────────
+  const postIncident = async (serverId: number, message: string) => {
+    if (!cfg.ai.backend_token) return;
+    try {
+      await api("/incidents", { method: "POST", body: JSON.stringify({ server_id: serverId, message, type: "parse_error" }) });
+    } catch (e) {
+      log(`Не удалось отправить incident: ${e}`, "warn");
+    }
+  };
+
   const runUpdate = async () => {
-    if (selectedServers.size === 0) { log("Не выбраны серверы!", "warn"); return; }
+    if (selectedServers.size === 0) { log("Выбери хотя бы один сервер", "warn"); return; }
+    if (selectedServers.size > 1) { log("Для безопасного diff-before-save выбери один сервер за запуск. Так не появятся скрытые pending-файлы.", "warn"); return; }
+    if (cfg.ai.provider === "openai" && !cfg.ai.backend_token) { log("Для OpenAI нужно войти через Telegram/backend", "err"); return; }
     running = true;
-    activeTab = "run";
-    log(`▶ Запуск: ${selectedServers.size} серв., режим=${mode.toUpperCase()}`);
+    activeTab = "dashboard";
+    syncBackendServersToLocalConfig();
+    await save();
+    log(`▶ Запуск: ${selectedServers.size} сервер(ов), режим ${mode.toUpperCase()}`);
 
     for (const id of Array.from(selectedServers).sort((a, b) => a - b)) {
       try {
+        if (cfg.ai.backend_token) {
+          const can = await api("/runs/can-start", { method: "POST", body: JSON.stringify({ server_id: id, mode: mode.toUpperCase(), ai_provider: cfg.ai.provider }) });
+          if (!can.allowed) throw new Error(`Лимит на сегодня исчерпан: ${can.used}/${can.daily_limit}`);
+        }
         await invoke("run_update", { serverNum: id, mode, skipLogin });
-        log(`✓ Сервер ${id} готов`, "ok");
+        log(`✓ Сервер ${id}: pending JSON создан, проверь Diff`, "ok");
       } catch (e) {
         log(`✗ Сервер ${id}: ${e}`, "err");
+        await postIncident(id, String(e));
+        if (cfg.ai.backend_token) {
+          try { await api("/runs/finish", { method: "POST", body: JSON.stringify({ server_id: id, mode: mode.toUpperCase(), ai_provider: cfg.ai.provider, status: "failed", file_saved: false, message: String(e) }) }); } catch {}
+        }
       }
+      await refreshHistory();
+      await refreshDiff();
     }
 
-    log("■ Обновление завершено", "ok");
+    await loadBackend();
+    log("■ Запуск завершён. Сохрани или отмени результат на вкладке Diff.", "ok");
     running = false;
   };
 
-  // ── Filtered server list for Servers tab ────────────────────────────────────
-  $: filteredGroups = serverSearch.trim()
-    ? SERVER_GROUPS.map(g => ({
-        ...g,
-        servers: g.servers.filter(id => String(id).includes(serverSearch.trim()))
-      })).filter(g => g.servers.length > 0)
-    : SERVER_GROUPS;
+  const applyCurrentDiff = async () => {
+    if (!diff) return;
+    try {
+      const serverNum = Number(diff.server);
+      const runMode = diff.mode.toLowerCase();
+      await invoke("apply_pending", { serverNum, mode: runMode });
+      if (cfg.ai.backend_token) {
+        await api("/runs/finish", { method: "POST", body: JSON.stringify({ server_id: serverNum, mode: diff.mode, ai_provider: cfg.ai.provider, status: "success", file_saved: true, message: "JSON сохранён после подтверждения diff" }) });
+      }
+      log("✓ Pending JSON сохранён", "ok");
+      await loadBackend();
+      await refreshHistory();
+      await refreshDiff();
+    } catch (e) {
+      log(`Ошибка сохранения pending: ${e}`, "err");
+    }
+  };
 
-  // ── Tab / mode helpers (no TypeScript casts in Svelte templates) ───────────
-  const setTab = (id: string) => { activeTab = id as "run" | "config" | "servers" | "ai"; };
-  const setMode = (val: string) => { mode = val as "uk" | "pdd" | "both"; };
+  const cancelCurrentDiff = async () => {
+    if (!diff) return;
+    try {
+      const serverNum = Number(diff.server);
+      const runMode = diff.mode.toLowerCase();
+      await invoke("cancel_pending", { serverNum, mode: runMode });
+      if (cfg.ai.backend_token) {
+        await api("/runs/finish", { method: "POST", body: JSON.stringify({ server_id: serverNum, mode: diff.mode, ai_provider: cfg.ai.provider, status: "cancelled", file_saved: false, message: "Пользователь отменил сохранение на diff-экране" }) });
+      }
+      log("Сохранение отменено", "warn");
+      await refreshHistory();
+      await refreshDiff();
+    } catch (e) {
+      log(`Ошибка отмены: ${e}`, "err");
+    }
+  };
 
-  // ── Mount ────────────────────────────────────────────────────────────────────
+  const ensureLocalLinks = (id: number): ServerLinks => {
+    const key = String(id);
+    cfg.servers[key] = normalizeLinks(cfg.servers[key]);
+    return cfg.servers[key];
+  };
+
+  const addLocalUrl = (id: number, type: "uk" | "pdd") => {
+    const key = String(id);
+    cfg.servers[key] = normalizeLinks(cfg.servers[key]);
+    const arr = type === "uk" ? cfg.servers[key].forum_uk_urls : cfg.servers[key].forum_pdd_urls;
+    arr.push("");
+    cfg = cfg;
+  };
+
+  const removeLocalUrl = (id: number, type: "uk" | "pdd", idx: number) => {
+    const key = String(id);
+    cfg.servers[key] = normalizeLinks(cfg.servers[key]);
+    const arr = type === "uk" ? cfg.servers[key].forum_uk_urls : cfg.servers[key].forum_pdd_urls;
+    arr.splice(idx, 1);
+    cfg = cfg;
+  };
+
+  const fmtDate = (ts: number) => new Date(ts * 1000).toLocaleString("ru-RU");
+  const statusLabel = (s: string) => s === "success" ? "Успешно" : s === "cancelled" ? "Отменено" : s === "pending" ? "Ожидает" : "Ошибка";
+
   onMount(async () => {
     await loadAll();
-
-    const unsub1 = await listen<string>("log", e => {
+    const unsub = await listen<string>("log", e => {
       const txt = e.payload;
+      const lower = txt.toLowerCase();
       const kind = txt.startsWith("✓") || txt.startsWith("Saved") ? "ok"
-                 : txt.startsWith("✗") || txt.toLowerCase().includes("error") || txt.toLowerCase().includes("failed") ? "err"
-                 : txt.startsWith("⚠") ? "warn"
-                 : "info";
+        : txt.startsWith("✗") || lower.includes("error") || lower.includes("failed") ? "err"
+        : txt.startsWith("⚠") ? "warn" : "info";
       log(txt, kind);
     });
-
-    return () => { unsub1(); };
+    return () => { unsub(); };
   });
 </script>
 
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-
-<div class="app">
-
-  <!-- ── Sidebar ─────────────────────────────────────────────────────────── -->
+<div class="shell">
   <aside class="sidebar">
-    <div class="logo">
-      <span class="logo-icon">⚙</span>
-      <span class="logo-text">Smart Config</span>
+    <div class="brand">
+      <div class="brand-mark">S</div>
+      <div>
+        <div class="brand-title">Smart Config</div>
+        <div class="brand-sub">Team Edition</div>
+      </div>
     </div>
 
-    <nav>
-      {#each [
-        { id: "run",     icon: "▶", label: "Запуск"    },
-        { id: "config",  icon: "🔑", label: "Настройки" },
-        { id: "servers", icon: "🖥", label: "Серверы"   },
-        { id: "ai",      icon: "🤖", label: "AI"        },
-      ] as tab}
-        <button
-          class="nav-btn"
-          class:active={activeTab === tab.id}
-          on:click={() => setTab(tab.id)}
-        >
-          <span class="nav-icon">{tab.icon}</span>
-          <span>{tab.label}</span>
+    <nav class="nav">
+      {#each tabs as tab}
+        <button class="nav-btn" class:active={activeTab === tab.id} on:click={() => setTab(tab.id)}>
+          <span>{tab.icon}</span><span>{tab.label}</span>
         </button>
       {/each}
     </nav>
 
-    <div class="sidebar-footer">
-      <div class="cfg-path" title={configPath}>{configPath.split("/").pop() || "config.json"}</div>
+    <div class="profile-card">
+      <div class="profile-row"><span>Роль</span><b>{backendUser?.role ?? "local"}</b></div>
+      <div class="profile-row"><span>AI</span><b>{cfg.ai.provider || "gemini"}</b></div>
+      <div class="profile-row"><span>Лимит</span><b>{dailyLimitText}</b></div>
     </div>
   </aside>
 
-  <!-- ── Main ────────────────────────────────────────────────────────────── -->
-  <main>
-
-    <!-- ════════════ RUN TAB ════════════ -->
-    {#if activeTab === "run"}
-      <div class="page-title">Запуск обновления</div>
-
-      <div class="run-top">
-
-        <!-- Mode -->
-        <div class="card">
-          <div class="card-label">Режим</div>
-          <div class="mode-row">
-            {#each [["uk","УК"],["pdd","ПДД"],["both","Оба"]] as [val, lbl]}
-              <button
-                class="mode-btn"
-                class:selected={mode === val}
-                on:click={() => setMode(val)}
-              >{lbl}</button>
-            {/each}
-          </div>
+  <main class="main">
+    {#if activeTab === "dashboard"}
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Панель проверки</p>
+          <h1>Обновление SmartUK / SmartPDD</h1>
+          <p>OpenAI работает через backend и списывает лимит только после сохранения diff. Gemini хранится локально и лимиты не списывает.</p>
         </div>
+        <button class="primary big" on:click={runUpdate} disabled={running}>{running ? "Выполняется..." : "Запустить проверку"}</button>
+      </section>
 
-        <!-- Options -->
-        <div class="card">
-          <div class="card-label">Опции</div>
-          <label class="toggle-row">
-            <input type="checkbox" bind:checked={skipLogin} />
-            <span>Пропустить логин на форуме</span>
-          </label>
+      {#if !backendUser}
+        <section class="panel login-card">
+          <h2>Вход через Telegram</h2>
+          <p class="muted">Открой бота, нажми /start, получи код и введи его здесь. Для Gemini можно работать локально, но история команды и OpenAI требуют вход.</p>
+          <div class="input-row"><input class="input" bind:value={loginCode} placeholder="AB12CD" /><button class="primary" on:click={loginWithTelegramCode}>Войти</button></div>
+          {#if backendError}<p class="error-text">{backendError}</p>{/if}
+        </section>
+      {/if}
+
+      <section class="grid-3">
+        <div class="glass-card"><span class="metric">{selectedServers.size}</span><small>выбрано серверов</small></div>
+        <div class="glass-card"><span class="metric">{mode.toUpperCase()}</span><small>режим проверки</small></div>
+        <div class="glass-card"><span class="metric">{dailyLimitText}</span><small>лимит OpenAI</small></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>Режим</h2></div>
+        <div class="segmented">
+          {#each [["uk","УК"],["pdd","ПДД"],["both","УК + ПДД"]] as [val, label]}
+            <button class:selected={mode === val} on:click={() => setMode(val)}>{label}</button>
+          {/each}
         </div>
+        <label class="check"><input type="checkbox" bind:checked={skipLogin} /> Пропустить логин на форуме</label>
+      </section>
 
-        <!-- Server selection -->
-        <div class="card card-wide">
-          <div class="card-label">Серверы</div>
-          <div class="sel-actions">
-            {#each SERVER_GROUPS as g}
-              <button class="sel-btn" on:click={() => selectGroup(g.servers)}>{g.label}</button>
-            {/each}
-            <button class="sel-btn" on:click={selectAll}>Все</button>
-            <button class="sel-btn red" on:click={clearSel}>Очистить</button>
-          </div>
-
-          <div class="server-chips">
-            {#each SERVER_GROUPS as g}
-              {#each g.servers as id}
-                <button
-                  class="chip"
-                  class:on={selectedServers.has(id)}
-                  on:click={() => toggleServer(id)}
-                >{id}</button>
-              {/each}
-            {/each}
-          </div>
-
-          <div class="sel-stat">
-            Выбрано: <strong>{selectedServers.size}</strong> серв.
-            {#if selectedServers.size > 0}
-              — {Array.from(selectedServers).sort((a,b)=>a-b).slice(0,10).join(", ")}{selectedServers.size > 10 ? "..." : ""}
-            {/if}
-          </div>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Серверы</h2>
+          <div class="actions"><button on:click={selectAll}>Все видимые</button><button on:click={clearSel}>Очистить</button></div>
         </div>
-
-      </div>
-
-      <!-- Run button -->
-      <button class="run-btn" on:click={runUpdate} disabled={running}>
-        {#if running}
-          <span class="spinner"></span> Обновление...
-        {:else}
-          ▶ Запустить
-        {/if}
-      </button>
-
-      <!-- Log -->
-      <div class="log-panel">
-        <div class="log-header">
-          <span>Лог</span>
-          <button class="log-clear" on:click={clearLog}>Очистить</button>
+        <input class="input search" bind:value={serverSearch} placeholder="Поиск сервера" />
+        <div class="cards-grid">
+          {#each filteredServers as srv}
+            <button class="server-card" class:on={selectedServers.has(srv.id)} on:click={() => toggleServer(srv.id)}>
+              <b>{srv.name}</b>
+              <span>#{srv.id}</span>
+            </button>
+          {/each}
         </div>
+        <p class="muted">Выбрано: {selectedPreview}{selectedServers.size > 12 ? "..." : ""}</p>
+      </section>
+
+      <section class="log-panel">
+        <div class="panel-head"><h2>Лог</h2><button on:click={() => logLines = []}>Очистить</button></div>
         <div id="log-box" class="log-box">
-          {#each logLines as line}
-            <div class="log-line {line.kind}">{line.text}</div>
-          {/each}
-          {#if logLines.length === 0}
-            <div class="log-line muted">Лог пуст. Запусти обновление.</div>
-          {/if}
+          {#each logLines as line}<div class="log-line {line.kind}">{line.text}</div>{/each}
+          {#if logLines.length === 0}<div class="log-line muted">Лог пуст.</div>{/if}
         </div>
-      </div>
+      </section>
     {/if}
 
-    <!-- ════════════ CONFIG TAB ════════════ -->
-    {#if activeTab === "config"}
-      <div class="page-title">Настройки</div>
-
-      <!-- Output dir -->
-      <div class="card">
-        <div class="card-label">Папка вывода</div>
-        <div class="row-input">
-          <input class="inp" value={cfg.output_dir} on:input={e => cfg.output_dir = e.currentTarget.value} placeholder="~/.smart-config-editor" />
-          <button class="btn-icon" on:click={pickOutputDir}>📂</button>
-          <button class="btn-icon" on:click={() => openShell(cfg.output_dir || configPath.replace(/[^/]+$/, ""))}>↗</button>
-        </div>
-      </div>
-
-      <!-- Arizona -->
-      <div class="card">
-        <div class="card-label">Arizona — аккаунт форума</div>
-        <div class="creds-grid">
-          <div>
-            <div class="field-label">Логин</div>
-            <input class="inp" bind:value={cfg.arizona.login} placeholder="username" autocomplete="off" />
-          </div>
-          <div>
-            <div class="field-label">Пароль</div>
-            <div class="row-input">
-              {#if showPw.arizona}
-                <input class="inp" type="text" bind:value={cfg.arizona.password} autocomplete="new-password" />
-              {:else}
-                <input class="inp" type="password" bind:value={cfg.arizona.password} autocomplete="new-password" />
-              {/if}
-              <button class="btn-icon" on:click={() => showPw.arizona = !showPw.arizona}>{showPw.arizona ? "🙈" : "👁"}</button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Rodina -->
-      <div class="card">
-        <div class="card-label">Rodina — аккаунт форума</div>
-        <div class="creds-grid">
-          <div>
-            <div class="field-label">Логин</div>
-            <input class="inp" bind:value={cfg.rodina.login} placeholder="username" autocomplete="off" />
-          </div>
-          <div>
-            <div class="field-label">Пароль</div>
-            <div class="row-input">
-              {#if showPw.rodina}
-                <input class="inp" type="text" bind:value={cfg.rodina.password} autocomplete="new-password" />
-              {:else}
-                <input class="inp" type="password" bind:value={cfg.rodina.password} autocomplete="new-password" />
-              {/if}
-              <button class="btn-icon" on:click={() => showPw.rodina = !showPw.rodina}>{showPw.rodina ? "🙈" : "👁"}</button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="save-row">
-        <button class="btn-primary" on:click={save}>💾 Сохранить</button>
-        <button class="btn-secondary" on:click={loadAll}>↺ Перезагрузить</button>
-        <button class="btn-ghost" on:click={() => openShell(configPath)}>📝 Открыть config.json</button>
-      </div>
+    {#if activeTab === "history"}
+      <section class="title-row"><div><p class="eyebrow">Последние 25</p><h1>История запусков</h1></div><button on:click={refreshHistory}>Обновить</button></section>
+      <section class="panel table-wrap">
+        <table>
+          <thead><tr><th>Дата</th><th>Пользователь</th><th>Сервер</th><th>Тип</th><th>AI</th><th>Статус</th><th>Лимит</th><th>Сохранено</th></tr></thead>
+          <tbody>
+            {#each history as h}
+              <tr>
+                <td>{fmtDate(h.created_at)}</td><td>{h.user}</td><td>{h.server}</td><td>{h.mode}</td><td>{h.ai_provider}</td>
+                <td><span class="badge {h.status}">{statusLabel(h.status)}</span></td>
+                <td>{h.limit_charged ? "Да" : "Нет"}</td><td>{h.file_saved ? "Да" : "Нет"}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+        {#if history.length === 0}<p class="muted">Истории пока нет.</p>{/if}
+      </section>
     {/if}
 
-    <!-- ════════════ SERVERS TAB ════════════ -->
+    {#if activeTab === "diff"}
+      <section class="title-row">
+        <div><p class="eyebrow">Предпросмотр изменений</p><h1>Diff последнего запуска</h1></div>
+        <div class="actions"><button on:click={refreshDiff}>Обновить</button>{#if diff}<button class="primary" on:click={applyCurrentDiff}>Сохранить</button><button class="danger" on:click={cancelCurrentDiff}>Отмена</button>{/if}</div>
+      </section>
+      {#if diff}
+        <section class="panel"><b>Сервер #{diff.server}</b> · {diff.mode} · файл ещё не записан, пока не нажмёшь “Сохранить”.</section>
+        <section class="grid-3">
+          <div class="glass-card add"><span class="metric">+{diff.added.length}</span><small>добавлено</small></div>
+          <div class="glass-card change"><span class="metric">~{diff.changed.length}</span><small>изменено</small></div>
+          <div class="glass-card remove"><span class="metric">-{diff.removed.length}</span><small>удалено</small></div>
+        </section>
+        <section class="diff-grid">
+          <div class="diff-card add"><h2>Добавлено</h2>{#each diff.added as item}<p>+ {item}</p>{/each}</div>
+          <div class="diff-card change"><h2>Изменено</h2>{#each diff.changed as item}<p>~ {item}</p>{/each}</div>
+          <div class="diff-card remove"><h2>Удалено</h2>{#each diff.removed as item}<p>- {item}</p>{/each}</div>
+        </section>
+      {:else}
+        <section class="panel"><p class="muted">Diff ещё не создан.</p></section>
+      {/if}
+    {/if}
+
+    {#if activeTab === "backups"}
+      <section class="title-row"><div><p class="eyebrow">Резервные копии</p><h1>Backups</h1></div></section>
+      <section class="panel"><p>Перед каждым подтверждённым сохранением файл копируется в подпапку <b>backups</b> рядом с JSON.</p><button on:click={() => openShell(cfg.output_dir || configPath.replace(/[^/]+$/, ""))}>Открыть папку вывода</button></section>
+    {/if}
+
     {#if activeTab === "servers"}
-      <div class="page-title">Ссылки на форум по серверам</div>
-
-      <div class="search-row">
-        <input class="inp search-inp" bind:value={serverSearch} placeholder="Поиск по номеру сервера..." />
-        {#if serverSearch}
-          <button class="btn-icon" on:click={() => serverSearch = ""}>✕</button>
-        {/if}
-      </div>
-
-      {#each filteredGroups as g}
-        <div class="server-group">
-          <div class="group-header">{g.label}</div>
-          {#each g.servers as id}
-            {@const srv = cfg.servers[String(id)] ?? { forum_uk_url:"",forum_uk_url_2:"",forum_pdd_url:"",forum_pdd_url_2:"" }}
-            <div class="server-row">
-              <button
-                class="srv-id"
-                class:has-links={srv.forum_uk_url || srv.forum_pdd_url}
-                on:click={() => expandedServer = expandedServer === String(id) ? null : String(id)}
-              >
-                <span class="srv-num">{id}</span>
-                <span class="srv-status">
-                  {#if srv.forum_uk_url && srv.forum_pdd_url}✅{:else if srv.forum_uk_url || srv.forum_pdd_url}⚡{:else}—{/if}
-                </span>
-                <span class="srv-arrow">{expandedServer === String(id) ? "▲" : "▼"}</span>
-              </button>
-
-              {#if expandedServer === String(id)}
-                <div class="srv-fields">
-                  {#each [
-                    ["forum_uk_url",  "УК — основная ссылка"],
-                    ["forum_uk_url_2","УК — доп. ссылка (опц.)"],
-                    ["forum_pdd_url", "ПДД/АК — основная ссылка"],
-                    ["forum_pdd_url_2","ПДД/АК — доп. ссылка (опц.)"],
-                  ] as [field, label]}
-                    <div class="srv-field-row">
-                      <div class="field-label">{label}</div>
-                      <div class="row-input">
-                        <input
-                          class="inp"
-                          value={getServerLink(id, field)}
-                          on:input={e => setServerLink(id, field, e.currentTarget.value)}
-                          placeholder="https://forum.arizona-rp.com/threads/..."
-                        />
-                        {#if getServerLink(id, field)}
-                          <button class="btn-icon" on:click={() => openShell(getServerLink(id, field))}>↗</button>
-                        {/if}
-                      </div>
-                    </div>
-                  {/each}
-                </div>
-              {/if}
+      <section class="title-row"><div><p class="eyebrow">Серверы и ссылки</p><h1>Серверы</h1></div><button class="primary" on:click={loadBackend}>Обновить с backend</button></section>
+      {#if backendServers.length > 0}
+        <section class="panel"><p>Список управляется через Telegram-бота. Editor/Admin могут добавлять серверы и любое количество UK/PDD-ссылок командами бота.</p></section>
+        {#each backendServers as s}
+          <section class="panel">
+            <h2>{s.name} <span class="muted">#{s.id}</span></h2>
+            <div class="links-grid">
+              <div><h3>UK</h3>{#each s.links.filter(l => l.type === "UK") as l}<p><b>{l.title || `Ссылка ${l.id}`}</b><br/><span class="muted">{l.url}</span></p>{/each}</div>
+              <div><h3>PDD</h3>{#each s.links.filter(l => l.type === "PDD") as l}<p><b>{l.title || `Ссылка ${l.id}`}</b><br/><span class="muted">{l.url}</span></p>{/each}</div>
             </div>
-          {/each}
-        </div>
-      {/each}
-
-      <div class="save-row">
-        <button class="btn-primary" on:click={save}>💾 Сохранить</button>
-      </div>
+          </section>
+        {/each}
+      {:else}
+        <section class="panel"><p class="muted">Backend не подключён. Ниже локальные ссылки для старого режима.</p></section>
+        {#each filteredServers as srv}
+          {@const links = ensureLocalLinks(srv.id)}
+          <section class="panel">
+            <h2>#{srv.id}</h2>
+            <div class="links-grid">
+              <div>
+                <h3>UK</h3>
+                {#each links.forum_uk_urls as _, i}
+                  <div class="input-row"><input class="input" bind:value={cfg.servers[String(srv.id)].forum_uk_urls[i]} placeholder="https://forum..." /><button on:click={() => removeLocalUrl(srv.id, "uk", i)}>✕</button></div>
+                {/each}
+                <button on:click={() => addLocalUrl(srv.id, "uk")}>+ UK ссылка</button>
+              </div>
+              <div>
+                <h3>PDD</h3>
+                {#each links.forum_pdd_urls as _, i}
+                  <div class="input-row"><input class="input" bind:value={cfg.servers[String(srv.id)].forum_pdd_urls[i]} placeholder="https://forum..." /><button on:click={() => removeLocalUrl(srv.id, "pdd", i)}>✕</button></div>
+                {/each}
+                <button on:click={() => addLocalUrl(srv.id, "pdd")}>+ PDD ссылка</button>
+              </div>
+            </div>
+          </section>
+        {/each}
+        <button class="primary" on:click={save}>Сохранить локальные ссылки</button>
+      {/if}
     {/if}
 
-    <!-- ════════════ AI TAB ════════════ -->
+    {#if activeTab === "config"}
+      <section class="title-row"><div><p class="eyebrow">Локальные настройки</p><h1>Конфиг</h1></div><button class="primary" on:click={save}>Сохранить</button></section>
+      <section class="panel"><h2>Backend</h2><label>URL backend<input class="input" bind:value={cfg.ai.backend_url} placeholder="https://api.smart.moder42.tech" /></label><button on:click={loadBackend}>Проверить подключение</button>{#if backendError}<p class="error-text">{backendError}</p>{/if}</section>
+      <section class="panel"><h2>Папка вывода</h2><div class="input-row"><input class="input" bind:value={cfg.output_dir} placeholder="Папка вывода" /><button on:click={pickOutputDir}>📂</button><button on:click={() => openShell(cfg.output_dir || configPath.replace(/[^/]+$/, ""))}>↗</button></div></section>
+      <section class="grid-2">
+        <div class="panel"><h2>Arizona форум</h2><label>Логин<input class="input" bind:value={cfg.arizona.login} /></label><label>Пароль<div class="input-row">{#if showPw.arizona}<input class="input" type="text" bind:value={cfg.arizona.password} />{:else}<input class="input" type="password" bind:value={cfg.arizona.password} />{/if}<button on:click={() => showPw.arizona = !showPw.arizona}>👁</button></div></label></div>
+        <div class="panel"><h2>Rodina форум</h2><label>Логин<input class="input" bind:value={cfg.rodina.login} /></label><label>Пароль<div class="input-row">{#if showPw.rodina}<input class="input" type="text" bind:value={cfg.rodina.password} />{:else}<input class="input" type="password" bind:value={cfg.rodina.password} />{/if}<button on:click={() => showPw.rodina = !showPw.rodina}>👁</button></div></label></div>
+      </section>
+    {/if}
+
     {#if activeTab === "ai"}
-      <div class="page-title">AI-настройки</div>
-
-      <!-- Provider -->
-      <div class="card">
-        <div class="card-label">Провайдер</div>
-        <div class="mode-row">
-          <button class="mode-btn" class:selected={cfg.ai.provider === "gemini"} on:click={() => cfg.ai.provider = "gemini"}>Gemini</button>
-          <button class="mode-btn" class:selected={cfg.ai.provider === "openai"} on:click={() => cfg.ai.provider = "openai"}>OpenAI</button>
-        </div>
-      </div>
-
-      <!-- Gemini keys -->
-      <div class="card" class:dim={cfg.ai.provider !== "gemini"}>
-        <div class="card-label">Gemini API ключи</div>
-        <div class="field-label">Модель</div>
-        <input class="inp" bind:value={cfg.ai.gemini_model} placeholder="gemini-2.0-flash" style="margin-bottom:12px" />
-
-        {#each cfg.ai.gemini_api_keys as _, i}
-          <div class="key-row">
-            <div class="field-label">Ключ #{i + 1}</div>
-            <div class="row-input">
-              <input class="inp" type="password" bind:value={cfg.ai.gemini_api_keys[i]} placeholder="AIza..." autocomplete="new-password" />
-              <button class="btn-icon red" on:click={() => removeKey("gemini", i)} disabled={cfg.ai.gemini_api_keys.length <= 1}>✕</button>
-            </div>
-          </div>
-        {/each}
-        <button class="btn-ghost small" on:click={() => addKey("gemini")}>+ Добавить ключ</button>
-      </div>
-
-      <!-- OpenAI keys -->
-      <div class="card" class:dim={cfg.ai.provider !== "openai"}>
-        <div class="card-label">OpenAI API ключи</div>
-        <div class="field-label">Модель</div>
-        <input class="inp" bind:value={cfg.ai.openai_model} placeholder="gpt-4.1-mini" style="margin-bottom:12px" />
-
-        {#each cfg.ai.openai_api_keys as _, i}
-          <div class="key-row">
-            <div class="field-label">Ключ #{i + 1}</div>
-            <div class="row-input">
-              <input class="inp" type="password" bind:value={cfg.ai.openai_api_keys[i]} placeholder="sk-..." autocomplete="new-password" />
-              <button class="btn-icon red" on:click={() => removeKey("openai", i)} disabled={cfg.ai.openai_api_keys.length <= 1}>✕</button>
-            </div>
-          </div>
-        {/each}
-        <button class="btn-ghost small" on:click={() => addKey("openai")}>+ Добавить ключ</button>
-      </div>
-
-      <div class="save-row">
-        <button class="btn-primary" on:click={save}>💾 Сохранить</button>
-      </div>
+      <section class="title-row"><div><p class="eyebrow">Провайдер</p><h1>AI настройки</h1></div><button class="primary" on:click={save}>Сохранить</button></section>
+      <section class="panel"><div class="segmented"><button class:selected={cfg.ai.provider === "gemini"} on:click={() => cfg.ai.provider = "gemini"}>Gemini локально</button><button class:selected={cfg.ai.provider === "openai"} on:click={() => cfg.ai.provider = "openai"}>OpenAI через backend</button></div></section>
+      <section class="grid-2">
+        <div class="panel"><h2>Gemini локально</h2><p class="muted">При Gemini лимиты не списываются.</p><label>Модель<input class="input" bind:value={cfg.ai.gemini_model} /></label>{#each cfg.ai.gemini_api_keys as _, i}<label>Ключ #{i+1}<div class="input-row"><input class="input" type="password" bind:value={cfg.ai.gemini_api_keys[i]} /><button on:click={() => { cfg.ai.gemini_api_keys.splice(i, 1); cfg = cfg; }}>✕</button></div></label>{/each}<button on:click={() => cfg.ai.gemini_api_keys = [...cfg.ai.gemini_api_keys, ""]}>+ ключ</button></div>
+        <div class="panel"><h2>OpenAI</h2><p>OpenAI-ключ хранится только на backend. В приложении сохраняется только Telegram/backend token.</p><label>Модель<input class="input" bind:value={cfg.ai.openai_model} /></label></div>
+      </section>
     {/if}
 
+    {#if activeTab === "profile"}
+      <section class="title-row"><div><p class="eyebrow">Аккаунт</p><h1>Профиль</h1></div>{#if backendUser}<button class="danger" on:click={logout}>Выйти</button>{/if}</section>
+      {#if backendUser}
+        <section class="panel"><p><b>Telegram ID:</b> {backendUser.telegram_id}</p><p><b>Роль:</b> {backendUser.role}</p><p><b>Лимит:</b> {backendUser.used_today ?? 0}/{backendUser.daily_limit}</p></section>
+      {:else}
+        <section class="panel"><p>Ты работаешь локально. Для командной истории, лимитов и OpenAI войди через Telegram-код.</p><div class="input-row"><input class="input" bind:value={loginCode} placeholder="Код из бота" /><button class="primary" on:click={loginWithTelegramCode}>Войти</button></div></section>
+      {/if}
+    {/if}
   </main>
 </div>
-
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-<style>
-  :global(*) { box-sizing: border-box; margin: 0; padding: 0; }
-  :global(body) {
-    font-family: "Inter", "Segoe UI", system-ui, sans-serif;
-    background: #0d1117;
-    color: #e6edf3;
-    height: 100vh;
-    overflow: hidden;
-  }
-
-  /* ── Layout ─────────────────────────────────────────────────────────── */
-  .app {
-    display: flex;
-    height: 100vh;
-  }
-
-  /* ── Sidebar ─────────────────────────────────────────────────────────── */
-  .sidebar {
-    width: 180px;
-    flex-shrink: 0;
-    background: #161b22;
-    border-right: 1px solid #30363d;
-    display: flex;
-    flex-direction: column;
-    padding: 16px 0;
-    gap: 4px;
-  }
-
-  .logo {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0 16px 16px;
-    border-bottom: 1px solid #30363d;
-    margin-bottom: 8px;
-  }
-  .logo-icon { font-size: 20px; }
-  .logo-text { font-size: 13px; font-weight: 700; color: #58a6ff; letter-spacing: 0.3px; }
-
-  nav { flex: 1; display: flex; flex-direction: column; gap: 2px; padding: 0 8px; }
-
-  .nav-btn {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 9px 10px;
-    border: none;
-    border-radius: 6px;
-    background: transparent;
-    color: #8b949e;
-    cursor: pointer;
-    font-size: 13px;
-    font-weight: 500;
-    transition: all 0.15s;
-    text-align: left;
-  }
-  .nav-btn:hover { background: #21262d; color: #e6edf3; }
-  .nav-btn.active { background: #1f6feb; color: #fff; }
-  .nav-icon { font-size: 15px; width: 20px; text-align: center; }
-
-  .sidebar-footer {
-    padding: 12px 12px 0;
-    border-top: 1px solid #30363d;
-  }
-  .cfg-path {
-    font-size: 10px;
-    color: #484f58;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  /* ── Main ─────────────────────────────────────────────────────────────── */
-  main {
-    flex: 1;
-    overflow-y: auto;
-    padding: 20px 24px;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-  }
-
-  .page-title {
-    font-size: 18px;
-    font-weight: 700;
-    color: #e6edf3;
-    padding-bottom: 4px;
-    border-bottom: 1px solid #30363d;
-    margin-bottom: 2px;
-  }
-
-  /* ── Card ─────────────────────────────────────────────────────────────── */
-  .card {
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 10px;
-    padding: 14px 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .card.dim { opacity: 0.5; pointer-events: none; }
-  .card-wide { /* same */ }
-  .card-label {
-    font-size: 11px;
-    font-weight: 700;
-    color: #58a6ff;
-    text-transform: uppercase;
-    letter-spacing: 0.6px;
-  }
-  .field-label {
-    font-size: 11px;
-    color: #8b949e;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-    margin-bottom: 4px;
-  }
-
-  /* ── Run tab layout ──────────────────────────────────────────────────── */
-  .run-top {
-    display: grid;
-    grid-template-columns: auto auto 1fr;
-    gap: 14px;
-  }
-
-  /* ── Mode buttons ─────────────────────────────────────────────────────── */
-  .mode-row { display: flex; gap: 6px; }
-  .mode-btn {
-    padding: 7px 18px;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    background: #21262d;
-    color: #8b949e;
-    font-weight: 600;
-    font-size: 13px;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-  .mode-btn:hover { border-color: #58a6ff; color: #e6edf3; }
-  .mode-btn.selected { background: #1f6feb; border-color: #1f6feb; color: #fff; }
-
-  /* ── Toggle ───────────────────────────────────────────────────────────── */
-  .toggle-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    color: #c9d1d9;
-    cursor: pointer;
-    user-select: none;
-  }
-  .toggle-row input { accent-color: #58a6ff; width: 15px; height: 15px; cursor: pointer; }
-
-  /* ── Server selection ─────────────────────────────────────────────────── */
-  .sel-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-  .sel-btn {
-    padding: 5px 12px;
-    border: 1px solid #30363d;
-    border-radius: 5px;
-    background: #21262d;
-    color: #8b949e;
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-  .sel-btn:hover { border-color: #58a6ff; color: #e6edf3; }
-  .sel-btn.red { border-color: #f85149; color: #f85149; }
-  .sel-btn.red:hover { background: rgba(248,81,73,0.15); }
-
-  .server-chips { display: flex; flex-wrap: wrap; gap: 5px; max-height: 120px; overflow-y: auto; }
-  .chip {
-    padding: 3px 9px;
-    border: 1px solid #30363d;
-    border-radius: 4px;
-    background: #21262d;
-    color: #8b949e;
-    font-size: 12px;
-    cursor: pointer;
-    transition: all 0.12s;
-    font-weight: 500;
-  }
-  .chip:hover { border-color: #58a6ff; }
-  .chip.on { background: #1f6feb; border-color: #1f6feb; color: #fff; }
-
-  .sel-stat { font-size: 12px; color: #8b949e; }
-  .sel-stat strong { color: #58a6ff; }
-
-  /* ── Run button ────────────────────────────────────────────────────────── */
-  .run-btn {
-    align-self: flex-start;
-    padding: 11px 32px;
-    border: none;
-    border-radius: 8px;
-    background: #238636;
-    color: #fff;
-    font-size: 15px;
-    font-weight: 700;
-    cursor: pointer;
-    transition: all 0.2s;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .run-btn:hover:not(:disabled) { background: #2ea043; transform: translateY(-1px); }
-  .run-btn:disabled { opacity: 0.6; cursor: not-allowed; }
-
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .spinner {
-    width: 14px; height: 14px;
-    border: 2px solid rgba(255,255,255,0.3);
-    border-top-color: #fff;
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-
-  /* ── Log ─────────────────────────────────────────────────────────────── */
-  .log-panel {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-height: 200px;
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 10px;
-    overflow: hidden;
-  }
-  .log-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 8px 12px;
-    background: #1c2128;
-    border-bottom: 1px solid #30363d;
-    font-size: 12px;
-    font-weight: 700;
-    color: #8b949e;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-  .log-clear {
-    padding: 2px 10px;
-    border: 1px solid #30363d;
-    border-radius: 4px;
-    background: transparent;
-    color: #8b949e;
-    font-size: 11px;
-    cursor: pointer;
-  }
-  .log-clear:hover { color: #e6edf3; border-color: #8b949e; }
-  .log-box {
-    flex: 1;
-    overflow-y: auto;
-    padding: 10px 12px;
-    font-family: "Cascadia Code", "Fira Mono", "IBM Plex Mono", monospace;
-    font-size: 12px;
-    line-height: 1.6;
-  }
-  .log-line { color: #c9d1d9; }
-  .log-line.ok   { color: #3fb950; }
-  .log-line.err  { color: #f85149; }
-  .log-line.warn { color: #d29922; }
-  .log-line.muted { color: #484f58; font-style: italic; }
-
-  /* ── Inputs ─────────────────────────────────────────────────────────── */
-  .inp {
-    width: 100%;
-    background: #0d1117;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    color: #e6edf3;
-    padding: 7px 10px;
-    font-size: 13px;
-    outline: none;
-    transition: border-color 0.15s;
-  }
-  .inp:focus { border-color: #58a6ff; }
-  .inp::placeholder { color: #484f58; }
-
-  .row-input { display: flex; gap: 6px; align-items: center; }
-  .row-input .inp { flex: 1; }
-
-  .creds-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-
-  .btn-icon {
-    padding: 7px 10px;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    background: #21262d;
-    color: #8b949e;
-    cursor: pointer;
-    font-size: 14px;
-    transition: all 0.15s;
-    white-space: nowrap;
-  }
-  .btn-icon:hover { border-color: #58a6ff; color: #e6edf3; }
-  .btn-icon.red { border-color: #f85149; color: #f85149; }
-  .btn-icon.red:hover { background: rgba(248,81,73,0.15); }
-  .btn-icon:disabled { opacity: 0.3; cursor: not-allowed; }
-
-  .btn-primary {
-    padding: 9px 20px;
-    border: none;
-    border-radius: 7px;
-    background: #238636;
-    color: #fff;
-    font-size: 13px;
-    font-weight: 700;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-  .btn-primary:hover { background: #2ea043; }
-
-  .btn-secondary {
-    padding: 9px 20px;
-    border: 1px solid #30363d;
-    border-radius: 7px;
-    background: transparent;
-    color: #8b949e;
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-  .btn-secondary:hover { color: #e6edf3; border-color: #8b949e; }
-
-  .btn-ghost {
-    padding: 9px 20px;
-    border: 1px solid #30363d;
-    border-radius: 7px;
-    background: transparent;
-    color: #8b949e;
-    font-size: 13px;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-  .btn-ghost:hover { border-color: #58a6ff; color: #58a6ff; }
-  .btn-ghost.small { padding: 5px 14px; font-size: 12px; }
-
-  .save-row { display: flex; gap: 10px; margin-top: 4px; }
-
-  /* ── Servers tab ─────────────────────────────────────────────────────── */
-  .search-row { display: flex; gap: 8px; align-items: center; }
-  .search-inp { max-width: 280px; }
-
-  .server-group { margin-bottom: 16px; }
-  .group-header {
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.6px;
-    color: #8b949e;
-    margin-bottom: 6px;
-    padding: 4px 0;
-    border-bottom: 1px solid #21262d;
-  }
-
-  .server-row { margin-bottom: 4px; }
-  .srv-id {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    width: 100%;
-    padding: 8px 12px;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    background: #161b22;
-    color: #c9d1d9;
-    cursor: pointer;
-    text-align: left;
-    font-size: 13px;
-    font-weight: 500;
-    transition: all 0.15s;
-  }
-  .srv-id:hover { border-color: #58a6ff; }
-  .srv-id.has-links { border-color: #238636; }
-  .srv-num { font-weight: 700; min-width: 36px; }
-  .srv-status { margin-left: 4px; }
-  .srv-arrow { margin-left: auto; color: #8b949e; font-size: 11px; }
-
-  .srv-fields {
-    background: #0d1117;
-    border: 1px solid #30363d;
-    border-top: none;
-    border-radius: 0 0 6px 6px;
-    padding: 12px 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .srv-field-row { display: flex; flex-direction: column; gap: 4px; }
-
-  /* ── AI tab ──────────────────────────────────────────────────────────── */
-  .key-row { margin-bottom: 6px; }
-</style>

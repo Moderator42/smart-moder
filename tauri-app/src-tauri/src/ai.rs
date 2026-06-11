@@ -197,34 +197,6 @@ pub async fn call_ai(
     original_json: &str,
 ) -> Result<String> {
     let provider = cfg.provider.as_str();
-    // select key
-    let (key, model) = if provider == "openai" {
-        let k = cfg
-            .openai_api_keys
-            .iter()
-            .find(|k| !k.trim().is_empty())
-            .cloned()
-            .unwrap_or_else(|| cfg.openai_api_key.clone());
-        if k.trim().is_empty() {
-            return Err(anyhow!("OpenAI API key not set"));
-        }
-        (k, cfg.openai_model.clone())
-    } else if provider == "gemini" {
-        let k = cfg
-            .gemini_api_keys
-            .iter()
-            .find(|k| !k.trim().is_empty())
-            .cloned()
-            .unwrap_or_else(|| cfg.gemini_api_key.clone());
-        if k.trim().is_empty() {
-            return Err(anyhow!("Gemini API key not set"));
-        }
-        (k, cfg.gemini_model.clone())
-    } else {
-        return Err(anyhow!("Unknown AI provider: {}", cfg.provider));
-    };
-
-    // Build prompts
     let system = if mode == "uk" { FILL_RULES_UK } else { FILL_RULES_PDD };
     let user = format!(
         "=== ТЕКСТ С ФОРУМА ===\n{}\n\n=== ТЕКУЩИЙ JSON ===\n{}\n",
@@ -232,14 +204,29 @@ pub async fn call_ai(
         original_json
     );
 
-    // Try several times with simple backoff.
     let mut last_error: Option<anyhow::Error> = None;
     for attempt in 0..3u32 {
-        match if provider == "gemini" {
-            call_gemini(&key, &model, system, &user).await
+        let result = if provider == "gemini" {
+            let key = cfg
+                .gemini_api_keys
+                .iter()
+                .find(|k| !k.trim().is_empty())
+                .cloned()
+                .unwrap_or_else(|| cfg.gemini_api_key.clone());
+            if key.trim().is_empty() {
+                return Err(anyhow!("Gemini API key not set"));
+            }
+            call_gemini(&key, &cfg.gemini_model, system, &user).await
+        } else if provider == "openai" {
+            if cfg.backend_token.trim().is_empty() {
+                return Err(anyhow!("Для OpenAI нужен вход через Telegram/backend token"));
+            }
+            call_backend_openai(cfg, mode, forum_text, original_json).await
         } else {
-            call_openai(&key, &model, system, &user).await
-        } {
+            return Err(anyhow!("Unknown AI provider: {}", cfg.provider));
+        };
+
+        match result {
             Ok(content) => return Ok(content),
             Err(err) => {
                 last_error = Some(err);
@@ -251,6 +238,33 @@ pub async fn call_ai(
     }
 
     Err(last_error.unwrap_or_else(|| anyhow!("AI request failed")))
+}
+
+async fn call_backend_openai(cfg: &AiConfig, mode: &str, forum_text: &str, original_json: &str) -> Result<String> {
+    let client = Client::builder().timeout(Duration::from_secs(180)).build()?;
+    let url = format!("{}/ai/openai/generate", cfg.backend_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "mode": mode.to_uppercase(),
+        "forum_text": forum_text,
+        "base_json": original_json,
+        "model": cfg.openai_model.clone(),
+    });
+    let resp = client
+        .post(url)
+        .bearer_auth(cfg.backend_token.trim())
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| anyhow!("Backend OpenAI request error: {e}"))?;
+    let status = resp.status();
+    let v: Value = resp.json().await.map_err(|e| anyhow!("Invalid backend OpenAI response: {e}"))?;
+    if !status.is_success() {
+        return Err(anyhow!("Backend OpenAI error: {}", v));
+    }
+    v.get("text")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow!("Backend OpenAI: no text in response"))
 }
 
 async fn call_openai(key: &str, model: &str, system: &str, user: &str) -> Result<String> {

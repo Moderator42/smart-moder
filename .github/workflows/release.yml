@@ -10,36 +10,32 @@ on:
       - "v*"
 
 jobs:
-  linux:
+  linux-deb:
     runs-on: ubuntu-22.04
-    container:
-      image: archlinux:latest
     steps:
-      - name: Install system deps
-        run: |
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm \
-            git curl wget base-devel \
-            webkit2gtk-4.1 libappindicator-gtk3 librsvg patchelf \
-            nodejs npm
-      - name: Install Rust
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
       - uses: actions/checkout@v4
-      - name: Build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+      - name: Build Debian package only
         working-directory: tauri-app
         run: |
-          source "$HOME/.cargo/env"
           npm ci
-          npm run tauri build -- --bundles deb,rpm
-      - name: Upload artifacts
+          npm run build:deb
+      - name: Upload DEB artifact
         uses: actions/upload-artifact@v4
         with:
-          name: linux-bundles
-          path: |
-            tauri-app/src-tauri/target/release/bundle/deb/*.deb
-            tauri-app/src-tauri/target/release/bundle/rpm/*.rpm
+          name: linux-deb
+          path: tauri-app/src-tauri/target/release/bundle/deb/*.deb
 
   windows:
     runs-on: windows-latest
@@ -49,12 +45,12 @@ jobs:
         with:
           node-version: 20
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build
+      - name: Build Windows installers
         working-directory: tauri-app
         run: |
           npm ci
-          npm run tauri build
-      - name: Upload artifacts
+          npm run build:windows
+      - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-bundles
@@ -65,14 +61,14 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
-      - linux
+      - linux-deb
       - windows
     runs-on: ubuntu-22.04
     steps:
-      - name: Download Linux artifacts
+      - name: Download Linux artifact
         uses: actions/download-artifact@v4
         with:
-          name: linux-bundles
+          name: linux-deb
           path: release-assets/linux
       - name: Download Windows artifacts
         uses: actions/download-artifact@v4
@@ -83,5 +79,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release-assets/linux/**/*
+            release-assets/linux/**/*.deb
             release-assets/windows/**/*

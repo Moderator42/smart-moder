@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:deb": "tauri build -- --bundles deb",
+    "build:windows": "tauri build -- --bundles nsis,msi"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
@@ -18,6 +20,7 @@
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^3.0.2",
     "@tauri-apps/cli": "^2.11.2",
+    "@types/node": "^20.19.43",
     "typescript": "^5.5.4",
     "vite": "^5.4.0"
   }

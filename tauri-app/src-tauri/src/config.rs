@@ -71,12 +71,7 @@ fn default_servers() -> HashMap<String, ServerLinks> {
     for info in get_servers() {
         map.insert(
             info.id.to_string(),
-            ServerLinks {
-                forum_uk_url: String::new(),
-                forum_uk_url_2: String::new(),
-                forum_pdd_url: String::new(),
-                forum_pdd_url_2: String::new(),
-            },
+            ServerLinks::default(),
         );
     }
     map
@@ -113,6 +108,9 @@ pub fn fill_config_defaults(cfg: &mut Config) {
     if cfg.ai.provider.is_empty() {
         cfg.ai.provider = "gemini".to_string();
     }
+    if cfg.ai.backend_url.is_empty() {
+        cfg.ai.backend_url = "https://api.smart.moder42.tech".to_string();
+    }
     if cfg.ai.openai_model.is_empty() {
         cfg.ai.openai_model = "gpt-4.1-mini".to_string();
     }
@@ -133,6 +131,10 @@ pub fn fill_config_defaults(cfg: &mut Config) {
         } else {
             cfg.ai.gemini_api_keys = vec![String::new()];
         }
+    }
+
+    for links in cfg.servers.values_mut() {
+        links.normalize();
     }
 }
 
@@ -177,6 +179,7 @@ mod tests {
         assert_eq!(cfg.ai.provider, "gemini");
         assert_eq!(cfg.ai.openai_model, "gpt-4.1-mini");
         assert_eq!(cfg.ai.gemini_model, "gemini-2.0-flash");
+        assert_eq!(cfg.ai.backend_url, "https://api.smart.moder42.tech");
         assert_eq!(cfg.ai.openai_api_keys, vec!["legacy-openai".to_string()]);
         assert_eq!(cfg.ai.gemini_api_keys, vec!["legacy-gemini".to_string()]);
         assert!(cfg.servers.contains_key("1"));

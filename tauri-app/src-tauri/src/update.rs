@@ -5,7 +5,7 @@ use encoding_rs::WINDOWS_1251;
 use reqwest::StatusCode;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager, Window};
 
 fn log(window: &Window, line: String) -> Result<()> {
@@ -30,15 +30,53 @@ fn backup_file(path: &Path) -> Result<()> {
     if path.exists() {
         let backup = path.with_extension("backup.json");
         fs::copy(path, &backup)?;
+
+        let backup_dir = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("backups");
+        fs::create_dir_all(&backup_dir)?;
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("SmartConfig");
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("json");
+        let stamped = backup_dir.join(format!("{}_{}.{}", stem, crate::history::timestamp(), ext));
+        fs::copy(path, stamped)?;
     }
     Ok(())
 }
 
 fn write_cp1251(path: &Path, data: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let (encoded, _, _) = WINDOWS_1251.encode(data);
     let mut file = fs::File::create(path)?;
     file.write_all(&encoded)?;
     Ok(())
+}
+
+fn pending_dir() -> PathBuf {
+    config::app_config_dir().join("pending")
+}
+
+fn pending_path(server_num: u32, mode: &str) -> PathBuf {
+    pending_dir().join(format!("{}_{}.json", server_num, mode.to_lowercase()))
+}
+
+fn remove_pending_quiet(server_num: u32, mode: &str) {
+    if mode.eq_ignore_ascii_case("both") {
+        remove_pending_quiet(server_num, "uk");
+        remove_pending_quiet(server_num, "pdd");
+        return;
+    }
+    let _ = fs::remove_file(pending_path(server_num, mode));
+}
+
+fn final_dest(cfg: &crate::types::Config, server_num: u32, mode: &str) -> PathBuf {
+    let filename = if mode.eq_ignore_ascii_case("uk") { "SmartUK.json" } else { "SmartPDD.json" };
+    config::output_dir(cfg).join(server_num.to_string()).join(filename)
 }
 
 fn normalize_reason(reason: &str) -> String {
@@ -49,7 +87,7 @@ fn diff_summary(
     old: &[crate::types::Chapter],
     new: &[crate::types::Chapter],
     mode: &str,
-) -> (Vec<String>, Vec<String>) {
+) -> (Vec<String>, Vec<String>, Vec<String>) {
     use std::collections::HashMap;
 
     let mut old_items: HashMap<String, crate::types::Item> = HashMap::new();
@@ -73,6 +111,13 @@ fn diff_summary(
     let key = if mode == "uk" { "lvl" } else { "amount" };
     let mut added = Vec::new();
     let mut changed = Vec::new();
+    let mut removed = Vec::new();
+
+    for reason in old_items.keys() {
+        if !new_items.contains_key(reason) {
+            removed.push(reason.clone());
+        }
+    }
 
     for reason in new_items.keys() {
         if !old_items.contains_key(reason) {
@@ -96,7 +141,7 @@ fn diff_summary(
         }
     }
 
-    (added, changed)
+    (added, changed, removed)
 }
 
 fn fmt_reasons(lst: &[String]) -> String {
@@ -167,8 +212,40 @@ pub async fn run_update(
 
     if mode == "both" {
         log(window, format!("Start: server {server_num}, mode both"))?;
-        run_update_mode(window, &app, &cfg, server_num, "uk",  skip_login).await?;
-        run_update_mode(window, &app, &cfg, server_num, "pdd", skip_login).await?;
+
+        if let Err(e) = run_update_mode(window, &app, &cfg, server_num, "uk", skip_login).await {
+            remove_pending_quiet(server_num, "both");
+            return Err(e);
+        }
+        let uk_diff = crate::history::load_last_diff().ok().flatten();
+
+        if let Err(e) = run_update_mode(window, &app, &cfg, server_num, "pdd", skip_login).await {
+            // UK+PDD is one user scenario: if the second part fails, do not leave partial pending JSON.
+            remove_pending_quiet(server_num, "both");
+            return Err(e);
+        }
+        let pdd_diff = crate::history::load_last_diff().ok().flatten();
+
+        let mut combined = crate::history::DiffReport {
+            created_at: 0,
+            server: server_num.to_string(),
+            mode: "BOTH".to_string(),
+            added: Vec::new(),
+            changed: Vec::new(),
+            removed: Vec::new(),
+        };
+        if let Some(d) = uk_diff {
+            combined.added.extend(d.added.into_iter().map(|x| format!("UK: {x}")));
+            combined.changed.extend(d.changed.into_iter().map(|x| format!("UK: {x}")));
+            combined.removed.extend(d.removed.into_iter().map(|x| format!("UK: {x}")));
+        }
+        if let Some(d) = pdd_diff {
+            combined.added.extend(d.added.into_iter().map(|x| format!("PDD: {x}")));
+            combined.changed.extend(d.changed.into_iter().map(|x| format!("PDD: {x}")));
+            combined.removed.extend(d.removed.into_iter().map(|x| format!("PDD: {x}")));
+        }
+        let _ = crate::history::save_diff(combined);
+
         log(window, format!("Completed: server {server_num}, mode both"))?;
         return Ok(());
     }
@@ -205,16 +282,12 @@ async fn run_update_mode(
     };
 
     // ── Check that forum URL is configured ──────────────────────────────────
-    let has_url = match mode {
-        "uk"  => !links.forum_uk_url.trim().is_empty(),
-        "pdd" => !links.forum_pdd_url.trim().is_empty(),
-        _     => false,
-    };
+    let has_url = !links.urls_for(mode).is_empty();
     if !has_url {
         log(window, format!("⚠ Нет ссылки на форум для сервера {server_num} / режим {mode} — пропускаю"))?;
         log(window, format!("  Открой вкладку «Серверы», введи ссылку и сохрани конфиг"))?;
-        log(window, format!("Completed: server {server_num}, mode {mode}"))?;
-        return Ok(());
+        let _ = crate::history::append(crate::history::entry(server_num, mode, &cfg.ai.provider, "failed", false, false, "Нет ссылки на форум"));
+        return Err(anyhow!("Нет ссылки на форум для сервера {server_num} / {mode}"));
     }
 
     // ── Fetch forum text ────────────────────────────────────────────────────
@@ -230,7 +303,8 @@ async fn run_update_mode(
         }
         Err(e) => {
             log(window, format!("Forum fetch failed: {e}"))?;
-            String::new()
+            let _ = crate::history::append(crate::history::entry(server_num, mode, &cfg.ai.provider, "failed", false, false, format!("Forum fetch failed: {e}")));
+            return Err(anyhow!("Forum fetch failed: {e}"));
         }
     };
 
@@ -247,8 +321,8 @@ async fn run_update_mode(
         log(window, "⚠ Текст форума слишком короткий — возможно, не удалось авторизоваться".to_string())?;
         log(window, "  Проверь логин/пароль или включи «Пропустить логин» если форум открыт без авторизации".to_string())?;
         log(window, "  AI не вызывается — файл не изменён".to_string())?;
-        log(window, format!("Completed: server {server_num}, mode {mode}"))?;
-        return Ok(());
+        let _ = crate::history::append(crate::history::entry(server_num, mode, &cfg.ai.provider, "failed", false, false, "Текст форума слишком короткий / страница не соответствует"));
+        return Err(anyhow!("Текст форума слишком короткий / страница не соответствует"));
     }
 
     // ── Download base JSON from GitHub ──────────────────────────────────────
@@ -291,11 +365,7 @@ async fn run_update_mode(
         }
     };
 
-    let filename = if mode == "uk" { "SmartUK.json" } else { "SmartPDD.json" };
-    let dest = server_dir.join(filename);
-    backup_file(&dest)?;
-    write_cp1251(&dest, &json_str)?;
-    log(window, format!("Downloaded JSON -> {}", dest.display()))?;
+    log(window, format!("Downloaded base JSON for diff: {} bytes", json_str.len()))?;
 
     let original_chapters = serde_json::from_str::<Vec<crate::types::Chapter>>(&json_str).ok();
 
@@ -335,9 +405,11 @@ async fn run_update_mode(
                     let mut processed = crate::merge::add_updated_at(processed);
                     crate::merge::sanitize_strings(&mut processed);
                     if let Ok(out_json) = crate::merge::serialize_output(&processed) {
-                        backup_file(&dest)?;
-                        write_cp1251(&dest, &out_json)?;
-                        log(window, format!("Saved merged JSON -> {}", dest.display()))?;
+                        let p = pending_path(server_num, mode);
+                        if let Some(parent) = p.parent() { fs::create_dir_all(parent)?; }
+                        fs::write(&p, out_json.as_bytes())?;
+                        log(window, format!("Pending JSON создан -> {}", p.display()))?;
+                        log(window, "Открой вкладку Diff и нажми «Сохранить» или «Отменить»".to_string())?;
                         updated_json = Some(processed);
                     }
                 }
@@ -349,9 +421,9 @@ async fn run_update_mode(
     }
 
     // ── Diff + changelog ────────────────────────────────────────────────────
-    if let Some(updated) = updated_json {
+    if let Some(updated) = updated_json.as_ref() {
         if let Some(original) = original_chapters.as_ref() {
-            let (added, changed) = diff_summary(original, &updated, mode);
+            let (added, changed, removed) = diff_summary(original, updated, mode);
             log(window, format!("Новых статей: +{}", added.len()))?;
             if !added.is_empty() {
                 log(window, format!("  -> {}", added.iter().take(20).cloned().collect::<Vec<_>>().join(", ")))?;
@@ -360,6 +432,18 @@ async fn run_update_mode(
             if !changed.is_empty() {
                 log(window, format!("  -> {}", changed.iter().take(20).cloned().collect::<Vec<_>>().join(", ")))?;
             }
+            log(window, format!("Удалено статей: -{}", removed.len()))?;
+            if !removed.is_empty() {
+                log(window, format!("  -> {}", removed.iter().take(20).cloned().collect::<Vec<_>>().join(", ")))?;
+            }
+            let _ = crate::history::save_diff(crate::history::DiffReport {
+                created_at: 0,
+                server: server_num.to_string(),
+                mode: mode.to_uppercase(),
+                added: added.clone(),
+                changed: changed.clone(),
+                removed: removed.clone(),
+            });
 
             let changelog = format_changelog(mode, &added, &changed, server_num);
             let cl_path = output_root.join(format!("changelog_{}_{}.txt", server_num, mode));
@@ -367,26 +451,85 @@ async fn run_update_mode(
             log(window, format!("Changelog -> {}", cl_path.display()))?;
         }
 
-        // ── Verify saved file ────────────────────────────────────────────────
-        log(window, "Verifying saved file...".to_string())?;
-        if let Ok(saved_raw) = fs::read(&dest) {
-            let saved_text = String::from_utf8(saved_raw.clone()).ok().or_else(|| {
-                let (cow, _, had_errors) = WINDOWS_1251.decode(&saved_raw);
-                if had_errors { None } else { Some(cow.to_string()) }
-            });
-            if let Some(text) = saved_text {
-                if let Ok(saved_data) = serde_json::from_str::<Vec<crate::types::Chapter>>(&text) {
-                    let has_ts = saved_data.iter().any(|e| e.name == "##updated_at");
-                    if has_ts {
-                        log(window, "##updated_at присутствует".to_string())?;
-                    } else {
-                        log(window, "##updated_at не найден".to_string())?;
-                    }
+        // ── Verify pending file ───────────────────────────────────────────────
+        log(window, "Verifying pending JSON...".to_string())?;
+        if let Ok(saved_raw) = fs::read(pending_path(server_num, mode)) {
+            let text = String::from_utf8_lossy(&saved_raw);
+            if let Ok(saved_data) = serde_json::from_str::<Vec<crate::types::Chapter>>(&text) {
+                let has_ts = saved_data.iter().any(|e| e.name == "##updated_at");
+                if has_ts {
+                    log(window, "##updated_at присутствует".to_string())?;
+                } else {
+                    log(window, "##updated_at не найден".to_string())?;
                 }
             }
         }
     }
 
+    let saved = updated_json.is_some();
+    if saved {
+        let _ = crate::history::append(crate::history::entry(server_num, mode, &cfg.ai.provider, "pending", false, false, "JSON создан и ожидает подтверждения на Diff-экране"));
+    } else {
+        let _ = crate::history::append(crate::history::entry(server_num, mode, &cfg.ai.provider, "failed", false, false, "JSON не был создан"));
+        return Err(anyhow!("JSON не был создан"));
+    }
+
     log(window, format!("Completed: server {server_num}, mode {mode}"))?;
+    Ok(())
+}
+
+pub fn apply_pending(server_num: u32, mode: &str) -> Result<()> {
+    let cfg = config::load_config()?;
+    if mode == "both" {
+        apply_pending(server_num, "uk")?;
+        apply_pending(server_num, "pdd")?;
+        return Ok(());
+    }
+    let p = pending_path(server_num, mode);
+    if !p.exists() {
+        return Err(anyhow!("Pending JSON не найден для сервера {} / {}", server_num, mode));
+    }
+    let data = fs::read_to_string(&p)?;
+    // Final JSON validation before writing cp1251 file.
+    let parsed: Vec<crate::types::Chapter> = serde_json::from_str(&data)
+        .map_err(|e| anyhow!("Pending JSON invalid: {e}"))?;
+    if parsed.iter().map(|c| c.item.len()).sum::<usize>() == 0 {
+        return Err(anyhow!("Pending JSON пустой — сохранение отменено"));
+    }
+    let dest = final_dest(&cfg, server_num, mode);
+    backup_file(&dest)?;
+    write_cp1251(&dest, &data)?;
+    let _ = fs::remove_file(&p);
+    let charged = cfg.ai.provider.to_lowercase() != "gemini";
+    let _ = crate::history::append(crate::history::entry(
+        server_num,
+        mode,
+        &cfg.ai.provider,
+        "success",
+        charged,
+        true,
+        "JSON сохранён после подтверждения diff",
+    ));
+    Ok(())
+}
+
+pub fn cancel_pending(server_num: u32, mode: &str) -> Result<()> {
+    let cfg = config::load_config()?;
+    if mode == "both" {
+        cancel_pending(server_num, "uk")?;
+        cancel_pending(server_num, "pdd")?;
+        return Ok(());
+    }
+    let p = pending_path(server_num, mode);
+    let _ = fs::remove_file(p);
+    let _ = crate::history::append(crate::history::entry(
+        server_num,
+        mode,
+        &cfg.ai.provider,
+        "cancelled",
+        false,
+        false,
+        "Пользователь отменил сохранение на diff-экране",
+    ));
     Ok(())
 }
