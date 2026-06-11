@@ -9,28 +9,63 @@ on:
 jobs:
   test:
     runs-on: ubuntu-22.04
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Force public npm registry
+        run: |
+          npm config set registry https://registry.npmjs.org/
+          npm config delete proxy || true
+          npm config delete https-proxy || true
+          npm config list
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: 20
-      - uses: actions/setup-python@v5
+          cache: npm
+          cache-dependency-path: tauri-app/package-lock.json
+          registry-url: https://registry.npmjs.org/
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Check backend syntax
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
           python -m compileall -q backend/app
+
       - name: Install Linux deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - name: Install and test
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install frontend dependencies
         working-directory: tauri-app
-        run: |
-          npm ci
-          npm run build
-          cd src-tauri
-          cargo test
+        run: npm ci --registry=https://registry.npmjs.org/ --fetch-timeout=300000 --fetch-retries=5
+
+      - name: Build frontend
+        working-directory: tauri-app
+        run: npm run build
+
+      - name: Rust tests
+        working-directory: tauri-app/src-tauri
+        run: cargo test
